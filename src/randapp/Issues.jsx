@@ -1,0 +1,643 @@
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
+import { supabase } from '../supabase.js'
+import { HOTEL_LOCATIONS } from '../locations.js'
+import { hotelGioClient } from '../hotelgio-data.js'
+import { fetchIssues, insertIssue, peekCachedIssues, updateIssueRow, deleteIssueRow, subscribeIssues } from '../issues-data.js'
+import { withTimeout } from '../async-timeout.js'
+import { Button, Card, Field, TextInput, Icon, IconButton, Badge, Segmented, Spinner, EmptyState, Sheet, ConfirmDialog } from './ui.jsx'
+import ListFetchNotice from './ListFetchNotice.jsx'
+import { putViewCache, takeViewCache } from './view-session-cache.js'
+import { canSendUrgent, ISSUE_CATEGORIES, ROOM_STATUS_OPTIONS, ISSUE_STATUS_META, URGENCY_META, compressPhotoAsDataUrl } from './helpers.js'
+import { canUser } from '../permissions.js'
+import { clearDraft, loadDraft, saveDraft } from '../draft-store.js'
+import { operationFailed } from '../operation-feedback.js'
+import OperationalDetailPage from './OperationalDetailPage.jsx'
+import OperationalTimeline from './OperationalTimeline.jsx'
+import { buildIssueTimeline } from './operational-timeline.js'
+import { useOperationalActionGuard } from './operational-action-guard.js'
+
+function LocationAutocomplete({ catalog, mode, onModeChange, value, onChange, error }) {
+  const [open, setOpen] = useState(false)
+  const wrapRef = useRef(null)
+  const rooms = useMemo(() => catalog.roomGroups.flatMap((g) => g.rooms), [catalog])
+  const query = value.trim().toLowerCase()
+  const suggestions = query
+    ? (mode === 'camera'
+      ? rooms.filter((r) => r.toLowerCase().startsWith(query))
+      : catalog.zones.filter((z) => [z.name, ...z.aliases].some((i) => i.toLowerCase().includes(query))).map((z) => z.name)).slice(0, 8)
+    : []
+  useEffect(() => {
+    const close = (e) => { if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false) }
+    document.addEventListener('pointerdown', close)
+    return () => document.removeEventListener('pointerdown', close)
+  }, [])
+  const changeMode = (next) => { onModeChange(next); onChange(''); setOpen(false) }
+  return (
+    <div className="rs-autocomplete" ref={wrapRef}>
+      <div className="rs-segmented" style={{ marginBottom: 8 }}>
+        {[['camera', 'Camera'], ['zona', 'Zona']].map(([k, l]) => (
+          <button type="button" key={k} className={mode === k ? 'active' : ''} onClick={() => changeMode(k)}>{l}</button>
+        ))}
+      </div>
+      <TextInput icon="search" value={value} inputMode={mode === 'camera' ? 'numeric' : 'text'} autoComplete="off"
+        data-testid="issue-location-input"
+        placeholder={mode === 'camera' ? 'Numero camera, es. 214' : 'Cerca zona, es. Hall'}
+        onFocus={() => setOpen(Boolean(query))}
+        onChange={(e) => { const next = mode === 'camera' ? e.target.value.replace(/[^0-9]/g, '') : e.target.value; onChange(next); setOpen(Boolean(next.trim())) }} />
+      {open && suggestions.length > 0 && (
+        <div className="rs-suggest" data-testid="issue-location-suggestions">
+          {suggestions.map((item) => (
+            <button type="button" key={item} onPointerDown={(e) => { e.preventDefault(); onChange(item); setOpen(false) }}><b>{item}</b></button>
+          ))}
+        </div>
+      )}
+      {error && <small className="rs-field__error">{error}</small>}
+    </div>
+  )
+}
+
+const NewIssueForm = memo(function NewIssueForm({ hotel, user, onCancel, onSaved }) {
+  const catalog = HOTEL_LOCATIONS[hotel.id]
+  const photoInputRef = useRef(null)
+  const draftOwner = user?.auth_user_id || user?.legacy_id || user?.id || user?.name || 'anonymous'
+  const restoredDraft = useMemo(() => loadDraft('issue', hotel.id, draftOwner), [hotel.id, draftOwner])
+  const [mode, setMode] = useState(restoredDraft?.mode || 'camera')
+  const [draft, setDraft] = useState(() => ({ location: '', title: '', urgency: 'media', category: 'Varie', photoName: '', photoData: null, roomStatus: null, ...(restoredDraft?.draft || {}) }))
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState('')
+  const [roomStatusSuggested, setRoomStatusSuggested] = useState(false)
+  useEffect(() => {
+    const saved = loadDraft('issue', hotel.id, draftOwner)
+    setMode(saved?.mode || 'camera')
+    setDraft({ location: '', title: '', urgency: 'media', category: 'Varie', photoName: '', photoData: null, roomStatus: null, ...(saved?.draft || {}) })
+    setSaveError('')
+  }, [hotel.id, draftOwner])
+  useEffect(() => {
+    const timer = window.setTimeout(() => saveDraft('issue', hotel.id, draftOwner, { mode, draft }), 250)
+    return () => window.clearTimeout(timer)
+  }, [hotel.id, draftOwner, mode, draft])
+  const validLocation = mode === 'camera'
+    ? catalog.roomGroups.some((g) => g.rooms.includes(draft.location.trim()))
+    : catalog.zones.some((z) => z.name === draft.location.trim())
+  const pickPhoto = async (file) => {
+    try { const photoData = await compressPhotoAsDataUrl(file); setDraft((c) => ({ ...c, photoName: file?.name || '', photoData })); setSaveError('') }
+    catch (error) { setSaveError('Impossibile preparare la foto. Riprova o invia senza foto.'); operationFailed(error, 'Foto non disponibile') }
+  }
+
+  useEffect(() => {
+    const room = draft.location.trim()
+    if (mode !== 'camera' || !room) return
+    let cancelled = false
+    hotelGioClient.from('camere_giorno').select('stato_slope').eq('hotel_id', hotel.id).eq('camera', room).maybeSingle()
+      .then(({ data }) => {
+        if (cancelled || !data) return
+        const mappa = { libera: 'libera', arrivo: 'in_arrivo', partenza: 'fermata_cliente', fermata: 'fermata_cliente', b2b: 'fermata_cliente' }
+        const suggerito = mappa[data.stato_slope]
+        if (suggerito) { setDraft((c) => ({ ...c, roomStatus: suggerito })); setRoomStatusSuggested(true) }
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [mode, draft.location, hotel.id])
+
+  const submit = async (e) => {
+    e.preventDefault()
+    if (!validLocation || !draft.title.trim() || saving) return
+    setSaving(true)
+    const issue = {
+      hotelId: hotel.id,
+      urgency: draft.urgency,
+      room: (mode === 'camera' ? 'Camera' : 'Zona') + ' · ' + draft.location.trim(),
+      title: draft.title.trim(),
+      status: 'todo',
+      createdAt: Date.now(),
+      createdByName: user?.name || 'App',
+      createdByUserId: user?.auth_user_id || user?.id || undefined,
+      department: user?.department || user?.role || null,
+      category: draft.category,
+      origin: 'App',
+      photoData: draft.photoData,
+      roomStatus: mode === 'camera' ? draft.roomStatus : null,
+    }
+    try {
+      await insertIssue(issue)
+      clearDraft('issue', hotel.id, draftOwner)
+      setSaveError('')
+      onSaved()
+    } catch (err) {
+      console.warn(err)
+      setSaveError(navigator.onLine ? 'Invio non riuscito. La bozza resta salvata: puoi riprovare.' : 'Sei offline. La bozza resta salvata sul dispositivo: puoi riprovare quando torna la rete.')
+      operationFailed(err, 'Segnalazione non inviata')
+      setSaving(false)
+    }
+  }
+
+  return (
+    <form className="rs-form" onSubmit={submit} data-testid="new-issue-form">
+      <div className="rs-form__head">
+        <IconButton icon="chevronLeft" label="Indietro" onClick={onCancel} />
+        <div><h2>Nuova segnalazione</h2><p>{hotel.name} · stato iniziale Da fare</p></div>
+      </div>
+      <Field label="Camera o zona">
+        <LocationAutocomplete catalog={catalog} mode={mode} onModeChange={setMode} value={draft.location} onChange={(location) => setDraft({ ...draft, location })}
+          error={draft.location && !validLocation ? (mode === 'camera' ? 'Camera non presente nella struttura.' : 'Scegli una zona riconosciuta.') : ''} />
+      </Field>
+      {mode === 'camera' && (
+        <fieldset className="rs-fieldset">
+          <legend>Stato camera (opzionale)</legend>
+          {roomStatusSuggested && <small className="rs-suggested-hint">🏠 Suggerito da Housekeeping (oggi) — puoi cambiarlo</small>}
+          <div className="rs-chips">
+            {ROOM_STATUS_OPTIONS.map(([k, l]) => (
+              <button type="button" key={k} className={`rs-chip ${draft.roomStatus === k ? 'active' : ''}`} onClick={() => { setRoomStatusSuggested(false); setDraft({ ...draft, roomStatus: draft.roomStatus === k ? null : k }) }}>{l}</button>
+            ))}
+          </div>
+        </fieldset>
+      )}
+      <fieldset className="rs-fieldset">
+        <legend>Urgenza</legend>
+        <div className="rs-chips">
+          {[['alta', 'Alta', 'high'], ['media', 'Media', 'mid'], ['bassa', 'Bassa', 'low']].map(([k, l, t]) => (
+            <button type="button" key={k} className={`rs-chip ${draft.urgency === k ? `active ${t}` : ''}`} onClick={() => setDraft({ ...draft, urgency: k })} data-testid={`urgency-${k}`}>{l}</button>
+          ))}
+        </div>
+      </fieldset>
+      <fieldset className="rs-fieldset">
+        <legend>Categoria</legend>
+        <div className="rs-chips">
+          {ISSUE_CATEGORIES.map((item) => (
+            <button type="button" key={item} className={`rs-chip ${draft.category === item ? 'active' : ''}`} onClick={() => setDraft({ ...draft, category: item })}>{item}</button>
+          ))}
+        </div>
+      </fieldset>
+      <Field label="Descrizione del problema">
+        <textarea className="rs-textarea" required rows="4" value={draft.title} placeholder="Descrivi il problema in modo chiaro" data-testid="issue-title-input"
+          onChange={(e) => setDraft({ ...draft, title: e.target.value })} />
+      </Field>
+      <fieldset className="rs-fieldset">
+        <legend>Foto (opzionale)</legend>
+        <div className="rs-photo-actions">
+          <input ref={photoInputRef} type="file" accept="image/*" hidden onChange={(e) => pickPhoto(e.target.files?.[0])} />
+          <button type="button" className="rs-photo-action" onClick={() => photoInputRef.current?.click()}><Icon name="camera" /><strong>Foto</strong></button>
+        </div>
+      </fieldset>
+      {draft.photoData && (
+        <div className="rs-photo-preview-wrap rs-photo-preview-wrap--full">
+          <img className="rs-photo-preview" src={draft.photoData} alt="Anteprima" />
+          <button type="button" className="rs-photo-remove" aria-label="Rimuovi foto" onClick={() => setDraft((c) => ({ ...c, photoData: null, photoName: '' }))}><Icon name="close" /></button>
+        </div>
+      )}
+      {saveError && <p className="rs-error" role="alert" data-testid="issue-save-error">{saveError}</p>}
+      {restoredDraft && !saveError && <small className="rs-field__hint">Bozza precedente ripristinata automaticamente.</small>}
+      <div className="rs-form-actions">
+        <Button type="button" variant="ghost" onClick={onCancel}>Annulla</Button>
+        <Button variant="primary" icon="plus" disabled={!validLocation || !draft.title.trim() || saving} data-testid="submit-issue">{saving ? 'Invio…' : 'Invia segnalazione'}</Button>
+      </div>
+    </form>
+  )
+})
+
+function IssuePhoto({ src, alt }) {
+  const [failed, setFailed] = useState(false)
+  const [open, setOpen] = useState(false)
+  useEffect(() => { setFailed(false); setOpen(false) }, [src])
+  useEffect(() => {
+    if (!open) return undefined
+    const close = (event) => { if (event.key === 'Escape') setOpen(false) }
+    document.addEventListener('keydown', close)
+    return () => document.removeEventListener('keydown', close)
+  }, [open])
+  if (!src || failed) return <div className="rs-photo-unavailable"><Icon name="image" /><span>Foto non disponibile</span></div>
+  return <>
+    <button type="button" className="rs-detail-photo-button" onClick={() => setOpen(true)} aria-label={`Ingrandisci ${alt}`}>
+      <img className="rs-detail-photo" src={src} alt={alt} onError={() => setFailed(true)} />
+      <span className="rs-detail-photo-hint">Tocca per ingrandire</span>
+    </button>
+    {open && <div className="rs-photo-lightbox" role="dialog" aria-modal="true" aria-label={alt} onClick={() => setOpen(false)}>
+      <button type="button" className="rs-photo-lightbox__close" onClick={() => setOpen(false)} aria-label="Chiudi foto">×</button>
+      <img src={src} alt={alt} onError={() => { setFailed(true); setOpen(false) }} onClick={(event) => event.stopPropagation()} />
+    </div>}
+  </>
+}
+
+function technicianWaLink(issue, extraNote, pageUrl) {
+  const phone = String(issue.technicianPhone || '').replace(/[^\d+]/g, '').replace(/^\+/, '')
+  if (!phone) return null
+  const lines = [`Ciao ${issue.technicianName}, c'è un intervento da fare in ${issue.room}${issue.category ? ` (${issue.category})` : ''}.`]
+  if (issue.title) lines.push(`Descrizione: ${issue.title}`)
+  if (extraNote) lines.push(extraNote)
+  lines.push(`Urgenza: ${URGENCY_META[issue.urgency]?.label || issue.urgency}`)
+  if (pageUrl) lines.push(`Dettagli e foto: ${pageUrl}`)
+  return `https://wa.me/${phone}?text=${encodeURIComponent(lines.join('\n\n'))}`
+}
+
+function IssueDetail({ issue, user, users, onClose, onUpdate, onDelete }) {
+  const [note, setNote] = useState('')
+  const [photo, setPhoto] = useState(null)
+  const [piece, setPiece] = useState('')
+  const [replaced, setReplaced] = useState('')
+  const [asking, setAsking] = useState('')
+  const [techChoice, setTechChoice] = useState('')
+  const [techNote, setTechNote] = useState(issue.technicianNote || '')
+  const [confirmDel, setConfirmDel] = useState(false)
+  const [editing, setEditing] = useState(false)
+  const [editDraft, setEditDraft] = useState(() => ({ room: issue.room || '', title: issue.title || '', urgency: issue.urgency || 'media', category: issue.category || 'Varie' }))
+  const { busy: actionBusy, error: actionError, run: runAction } = useOperationalActionGuard()
+  const canComplete = canUser(user, 'issues', 'complete') || canUser(user, 'issues', 'take_charge')
+  const currentAuthUserId = user?.auth_user_id || user?.id || null
+  const isOwnIssue = Boolean(issue.createdByUserId) && issue.createdByUserId === currentAuthUserId
+  const canDelete = canUser(user, 'issues', 'delete') || isOwnIssue
+  const isOwnSupremoIssue = user?.role === 'Supremo' && isOwnIssue
+  const canEditDetails = canUser(user, 'issues', 'edit') || isOwnSupremoIssue
+  const technicians = (users || []).filter((p) => p.role === 'Tecnico esterno')
+  const meta = ISSUE_STATUS_META[issue.status] || {}
+  const timelineEvents = useMemo(() => buildIssueTimeline(issue), [issue])
+
+  const closeAfter = (action) => runAction(action, { onSuccess: onClose })
+  const complete = () => closeAfter(() => onUpdate(issue.id, { status: 'done', completionNote: note.trim() || null, completionPhotoData: photo, completedBy: user?.name, completedAt: Date.now() }))
+  const confirmPiece = () => { if (!piece.trim()) return; return closeAfter(() => onUpdate(issue.id, { status: 'waiting', pieceName: piece.trim() })) }
+  const confirmReplaced = async () => {
+    if (!replaced.trim()) return
+    const result = await runAction(() => onUpdate(issue.id, { pieceReplaced: replaced.trim(), pieceReplacedBy: user?.name }))
+    if (result.ok) { setAsking(''); setReplaced('') }
+  }
+  const confirmTech = () => {
+    const t = technicians.find((p) => p.id === techChoice)
+    if (!t) return
+    return closeAfter(() => onUpdate(issue.id, { status: 'tecnico', technicianRequestedBy: user?.name, technicianId: t.id, technicianName: t.name, technicianPhone: t.phone || null }))
+  }
+  const pieceArrived = () => closeAfter(() => onUpdate(issue.id, { status: 'todo' }))
+  const techDone = () => closeAfter(() => onUpdate(issue.id, { status: 'done', completedBy: user?.name, completedAt: Date.now() }))
+  const saveEdit = async () => {
+    if (!editDraft.room.trim() || !editDraft.title.trim()) return
+    await closeAfter(() => onUpdate(issue.id, {
+      room: editDraft.room.trim(),
+      title: editDraft.title.trim(),
+      urgency: editDraft.urgency,
+      category: editDraft.category,
+    }))
+  }
+  const openWhatsApp = async () => {
+    let shareId = issue.id
+    try {
+      const { data: token, error } = await supabase.rpc('ensure_issue_public_share_token', {
+        p_issue_id: issue.id,
+        p_hotel_id: issue.hotelId,
+      })
+      if (!error && token) shareId = token
+    } catch { /* fall back to UUID for offline / pre-migration */ }
+    const pageUrl = `${window.location.origin}/s/${shareId}`
+    window.open(technicianWaLink(issue, techNote.trim(), pageUrl), '_blank')
+  }
+
+  const primaryAction = (() => {
+    if (!canComplete || editing || asking) return null
+    if (issue.status === 'waiting') {
+      return { label: 'Pezzo arrivato', icon: 'package', onClick: pieceArrived, busy: actionBusy, busyLabel: 'Salvataggio…' }
+    }
+    if (issue.status === 'tecnico' && issue.technicianName) {
+      return { label: 'Segna completata', icon: 'check', onClick: techDone, busy: actionBusy, busyLabel: 'Salvataggio…' }
+    }
+    if (issue.status === 'todo') {
+      return { label: 'Riparazione completata', icon: 'check', onClick: complete, busy: actionBusy, busyLabel: 'Salvataggio…' }
+    }
+    return null
+  })()
+
+  return (
+    <OperationalDetailPage kind="issue" resourceId={issue.id} title={issue.ticketCode || 'Segnalazione'} subtitle={issue.room || 'Dettaglio segnalazione'} onBack={onClose} primaryAction={primaryAction} className="rs-issue-detail">
+      {actionError && <p className="rs-error" role="alert" data-testid="operational-action-error">{actionError}</p>}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+        <Badge tone={URGENCY_META[issue.urgency]?.tone}>{URGENCY_META[issue.urgency]?.label || issue.urgency}</Badge>
+        <Badge tone={meta.tone}>{meta.label}</Badge>
+        {canEditDetails && !editing && <Button size="sm" variant="ghost" style={{ marginLeft: 'auto' }} disabled={actionBusy} onClick={() => setEditing(true)}>Modifica</Button>}
+        {canDelete && <IconButton icon="trash" label="Elimina" style={{ marginLeft: canEditDetails ? 0 : 'auto' }} disabled={actionBusy} onClick={() => setConfirmDel(true)} data-testid="delete-issue" />}
+      </div>
+      {editing ? (
+        <div className="rs-actions-stack">
+          <Field label="Camera o zona"><TextInput value={editDraft.room} onChange={(e) => setEditDraft((c) => ({ ...c, room: e.target.value }))} /></Field>
+          <Field label="Descrizione"><textarea className="rs-textarea" rows="4" value={editDraft.title} onChange={(e) => setEditDraft((c) => ({ ...c, title: e.target.value }))} /></Field>
+          <fieldset className="rs-fieldset">
+            <legend>Urgenza</legend>
+            <div className="rs-chips">
+              {[['alta', 'Alta', 'high'], ['media', 'Media', 'mid'], ['bassa', 'Bassa', 'low']].map(([k, l, t]) => (
+                <button type="button" key={k} className={`rs-chip ${editDraft.urgency === k ? `active ${t}` : ''}`} onClick={() => setEditDraft((c) => ({ ...c, urgency: k }))}>{l}</button>
+              ))}
+            </div>
+          </fieldset>
+          <fieldset className="rs-fieldset">
+            <legend>Categoria</legend>
+            <div className="rs-chips">
+              {ISSUE_CATEGORIES.map((item) => <button type="button" key={item} className={`rs-chip ${editDraft.category === item ? 'active' : ''}`} onClick={() => setEditDraft((c) => ({ ...c, category: item }))}>{item}</button>)}
+            </div>
+          </fieldset>
+          {isOwnSupremoIssue && <small className="rs-field__hint">Puoi correggere solo i dettagli delle manutenzioni create da te. Stato, assegnazioni e completamento restano in sola lettura.</small>}
+          <div className="rs-form-actions"><Button variant="ghost" onClick={() => setEditing(false)}>Annulla</Button><Button variant="primary" disabled={!editDraft.room.trim() || !editDraft.title.trim()} onClick={saveEdit}>Salva modifiche</Button></div>
+        </div>
+      ) : (
+        <>
+          <h2 className="rs-detail-room">{issue.ticketCode ? `${issue.ticketCode} · ` : ""}{issue.room}</h2>
+          <p className="rs-detail-desc">{issue.title}</p>
+          <p className="rs-detail-origin">Da {issue.origin || 'App'}{issue.createdByName ? ` · ${issue.createdByName}` : ''} · {issue.date}</p>
+          <dl className="rs-meta-grid">
+            <div><dt>Reparto</dt><dd>{issue.department || '—'}</dd></div>
+            <div><dt>Categoria</dt><dd>{issue.category || '—'}</dd></div>
+            {issue.roomStatus && <div><dt>Stato camera</dt><dd>{ROOM_STATUS_OPTIONS.find(([k]) => k === issue.roomStatus)?.[1] || issue.roomStatus}</dd></div>}
+          </dl>
+          <OperationalTimeline events={timelineEvents} />
+        </>
+      )}
+
+      {issue.status === 'tecnico' && canSendUrgent(user) && !issue.technicianName && (
+        <div className="rs-actions-stack">
+          {(
+            <div style={{ marginTop: 8 }}>
+              <Field label="Quale tecnico esterno?">
+                <select className="rs-select" value={techChoice} onChange={(e) => setTechChoice(e.target.value)}>
+                  <option value="">Scegli…</option>
+                  {technicians.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                </select>
+              </Field>
+              {!technicians.length && <p className="rs-field__hint">Nessun tecnico esterno configurato per questa struttura.</p>}
+              <Button variant="primary" disabled={!techChoice} onClick={confirmTech} style={{ marginTop: 8 }}>Assegna tecnico</Button>
+            </div>
+          )}
+        </div>
+      )}
+      {issue.status === 'tecnico' && canSendUrgent(user) && issue.technicianName && (
+        <div className="rs-actions-stack">
+              <Field label="Nota per il tecnico (facoltativa)">
+                <textarea className="rs-textarea" rows="2" value={techNote} onChange={(e) => setTechNote(e.target.value)} placeholder="Aggiungi dettagli per il tecnico" />
+              </Field>
+              <div className="rs-action-pair" style={{ marginTop: 8 }}>
+                <Button variant="ghost" disabled={actionBusy} onClick={() => runAction(() => onUpdate(issue.id, { technicianNote: techNote.trim() || null }))}>Salva nota</Button>
+                {issue.technicianPhone && (
+                  <Button variant="primary" icon="message" onClick={openWhatsApp}>Apri WhatsApp</Button>
+                )}
+              </div>
+              {!issue.technicianPhone && <p className="rs-field__hint">Numero del tecnico non disponibile.</p>}
+        </div>
+      )}
+      {issue.status === 'waiting' && canSendUrgent(user) && !issue.pieceDecision && (
+        <div className="rs-actions-stack">
+          <div className="rs-action-pair">
+              <Button variant="ghost" icon="package" disabled={actionBusy} onClick={() => runAction(() => onUpdate(issue.id, { pieceDecision: 'ritiro', pieceDecisionBy: user?.name }))}>Vado a prenderlo</Button>
+              <Button variant="ghost" icon="package" disabled={actionBusy} onClick={() => runAction(() => onUpdate(issue.id, { pieceDecision: 'ordine', pieceDecisionBy: user?.name }))}>Lo ordino</Button>
+          </div>
+        </div>
+      )}
+
+      {issue.status === 'todo' && canComplete && !asking && (
+        <div className="rs-actions-stack">
+          <p className="rs-actions-heading">Azioni</p>
+          <div className="rs-action-pair">
+            <Button variant="ghost" icon="package" onClick={() => setAsking('piece')} data-testid="action-piece">Serve pezzo</Button>
+            {!issue.pieceReplaced && <Button variant="ghost" icon="package" onClick={() => setAsking('replaced')}>Pezzo sostituito</Button>}
+          </div>
+          <Button variant="ghost" icon="message"
+            onClick={() => { if (canSendUrgent(user)) setAsking('tech'); else { onUpdate(issue.id, { status: 'tecnico', technicianAskedBy: user?.name }); onClose() } }}>
+            Chiedi un tecnico
+          </Button>
+          <Field label="Note sul lavoro fatto (facoltative)">
+            <textarea className="rs-textarea" rows="3" value={note} onChange={(e) => setNote(e.target.value)} placeholder="Cosa è stato fatto" data-testid="completion-note" />
+          </Field>
+          <label className="rs-photo-action" style={{ borderStyle: 'dashed' }}>
+            <input type="file" accept="image/*" onChange={async (e) => setPhoto(await compressPhotoAsDataUrl(e.target.files?.[0]))} />
+            <Icon name="camera" /><strong>{photo ? 'Foto aggiunta' : 'Aggiungi foto completamento'}</strong>
+          </label>
+          {photo && <img className="rs-photo-preview" src={photo} alt="Anteprima" />}
+        </div>
+      )}
+
+      {asking === 'piece' && (
+        <div className="rs-actions-stack">
+          <Field label="Nome del pezzo in attesa"><TextInput value={piece} onChange={(e) => setPiece(e.target.value)} placeholder="Es. Faretto LED IP65" /></Field>
+          <div className="rs-form-actions"><Button variant="ghost" onClick={() => setAsking('')}>Annulla</Button><Button variant="primary" disabled={!piece.trim()} onClick={confirmPiece}>Conferma</Button></div>
+        </div>
+      )}
+      {asking === 'replaced' && (
+        <div className="rs-actions-stack">
+          <Field label="Cosa hai sostituito"><TextInput value={replaced} onChange={(e) => setReplaced(e.target.value)} placeholder="Es. Lampadina LED bagno" /></Field>
+          <div className="rs-form-actions"><Button variant="ghost" onClick={() => setAsking('')}>Annulla</Button><Button variant="primary" disabled={!replaced.trim()} onClick={confirmReplaced}>Registra</Button></div>
+        </div>
+      )}
+      {asking === 'tech' && (
+        <div className="rs-actions-stack">
+          <Field label="Quale tecnico esterno?">
+            <select className="rs-select" value={techChoice} onChange={(e) => setTechChoice(e.target.value)}>
+              <option value="">Scegli…</option>
+              {technicians.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+            </select>
+          </Field>
+          {!technicians.length && <p className="rs-field__hint">Nessun tecnico esterno configurato per questa struttura.</p>}
+          <div className="rs-form-actions"><Button variant="ghost" onClick={() => setAsking('')}>Annulla</Button><Button variant="primary" disabled={!techChoice} onClick={confirmTech}>Conferma richiesta</Button></div>
+        </div>
+      )}
+
+      <ConfirmDialog open={confirmDel} title="Eliminare la segnalazione?" message="L'azione non è reversibile." confirmLabel="Elimina" danger
+        onCancel={() => setConfirmDel(false)} onConfirm={() => runAction(() => onDelete(issue.id), { onSuccess: () => { setConfirmDel(false); onClose() } })} />
+    </OperationalDetailPage>
+  )
+}
+
+const FILTERS = [
+  ['todo', 'Da fare'],
+  ['tecnico', 'Tecnico'],
+  ['waiting', 'Attesa pezzo'],
+  ['done', 'Completate'],
+  ['all', 'Tutte'],
+]
+
+const ISSUE_SORT_OPTIONS = [
+  ['room', 'Camera / zona'],
+  ['urgency', 'Urgenza'],
+  ['status', 'Stato'],
+  ['category', 'Categoria'],
+  ['date', 'Data'],
+]
+const URGENCY_SORT = { alta: 3, media: 2, bassa: 1 }
+const STATUS_SORT = { todo: 1, tecnico: 2, waiting: 3, done: 4 }
+function issueRoomSortValue(room) {
+  const label = String(room || '').trim()
+  const match = label.match(/(?:Camera\s*·\s*)?(\d{1,4})/i)
+  if (match) return { type: 0, number: Number(match[1]), text: label.toLocaleLowerCase('it') }
+  return { type: 1, number: 0, text: label.toLocaleLowerCase('it') }
+}
+function compareIssueRooms(a, b) {
+  const left = issueRoomSortValue(a.room)
+  const right = issueRoomSortValue(b.room)
+  if (left.type !== right.type) return left.type - right.type
+  if (left.type === 0 && left.number !== right.number) return left.number - right.number
+  return left.text.localeCompare(right.text, 'it', { numeric: true, sensitivity: 'base' })
+}
+
+export default function Issues({ user, hotel, users, createSignal, focusIssueId = null, onFocusConsumed, onDetailChange }) {
+  const cacheKey = `issues:${hotel.id}`
+  const warm = takeViewCache(cacheKey)
+  const [loading, setLoading] = useState(() => !(Array.isArray(warm) && warm.length))
+  const [issues, setIssues] = useState(() => (Array.isArray(warm) ? warm : []))
+  const [fetchOk, setFetchOk] = useState(true)
+  const [fetchOffline, setFetchOffline] = useState(false)
+  const [filter, setFilter] = useState('todo')
+  const [search, setSearch] = useState('')
+  const [sortOpen, setSortOpen] = useState(false)
+  const [sortBy, setSortBy] = useState('date')
+  const [sortDir, setSortDir] = useState('desc')
+  const [urgencyFilter, setUrgencyFilter] = useState('all')
+  const [categoryFilter, setCategoryFilter] = useState('all')
+  const [locationFilter, setLocationFilter] = useState('all')
+  const [creating, setCreating] = useState(false)
+  const [selected, setSelected] = useState(null)
+
+  useEffect(() => { if (createSignal && canUser(user, 'issues', 'create')) setCreating(true) }, [createSignal])
+
+  const reload = (opts = {}) => {
+    const soft = opts.soft === true
+    if (!soft) setLoading(true)
+    return withTimeout(fetchIssues(hotel.id), 45000, 'Segnalazioni timeout')
+      .then((result) => {
+        const next = result.issues || []
+        setIssues(next)
+        putViewCache(cacheKey, next)
+        setFetchOk(result.ok !== false)
+        setFetchOffline(Boolean(result.offline))
+      })
+      .catch(() => {
+        setFetchOk(false)
+        setFetchOffline(typeof navigator !== 'undefined' ? !navigator.onLine : false)
+      })
+      .finally(() => setLoading(false))
+  }
+
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      const sessionWarm = takeViewCache(cacheKey)
+      if (Array.isArray(sessionWarm) && sessionWarm.length) {
+        setIssues(sessionWarm)
+        setLoading(false)
+      } else {
+        try {
+          const cached = await peekCachedIssues(hotel.id)
+          if (cancelled) return
+          if (cached.length) {
+            setIssues(cached)
+            putViewCache(cacheKey, cached)
+            setLoading(false)
+          }
+        } catch {
+          /* cache miss is fine */
+        }
+      }
+      if (!cancelled) await reload({ soft: true })
+    })()
+    const unsub = subscribeIssues(hotel.id, () => { void reload({ soft: true }) })
+    return () => {
+      cancelled = true
+      unsub?.()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hotel.id])
+
+  const focusedIssue = useMemo(
+    () => focusIssueId == null ? null : issues.find((issue) => String(issue.id) === String(focusIssueId)) || null,
+    [focusIssueId, issues],
+  )
+  const activeIssue = selected || focusedIssue
+
+  useEffect(() => {
+    onDetailChange?.(activeIssue ? { kind: 'issue', id: String(activeIssue.id) } : null)
+    return () => onDetailChange?.(null)
+  }, [activeIssue?.id, onDetailChange])
+
+  const counts = useMemo(() => issues.reduce((acc, i) => ({ ...acc, [i.status]: (acc[i.status] || 0) + 1 }), {}), [issues])
+  const filtered = useMemo(() => {
+  const q = search.trim().toLowerCase()
+  const direction = sortDir === 'asc' ? 1 : -1
+  return issues
+    .filter((i) => filter === 'all' || i.status === filter)
+    .filter((i) => urgencyFilter === 'all' || i.urgency === urgencyFilter)
+    .filter((i) => categoryFilter === 'all' || i.category === categoryFilter)
+    .filter((i) => locationFilter === 'all' || (locationFilter === 'camera' ? /^Camera\s*·/i.test(i.room || '') : !/^Camera\s*·/i.test(i.room || '')))
+    .filter((i) => !q || `${i.ticketCode || ''} ${i.room} ${i.title} ${i.category}`.toLowerCase().includes(q))
+    .sort((a, b) => {
+      if (sortBy === 'room') return compareIssueRooms(a, b) * direction
+      if (sortBy === 'urgency') return ((URGENCY_SORT[a.urgency] || 0) - (URGENCY_SORT[b.urgency] || 0)) * direction
+      if (sortBy === 'status') return ((STATUS_SORT[a.status] || 99) - (STATUS_SORT[b.status] || 99)) * direction
+      if (sortBy === 'category') return String(a.category || '').localeCompare(String(b.category || ''), 'it', { sensitivity: 'base' }) * direction
+      return ((Number(a.createdAt) || 0) - (Number(b.createdAt) || 0)) * direction
+    })
+}, [issues, filter, search, sortBy, sortDir, urgencyFilter, categoryFilter, locationFilter])
+const extraFilterCount = (urgencyFilter !== 'all' ? 1 : 0) + (categoryFilter !== 'all' ? 1 : 0) + (locationFilter !== 'all' ? 1 : 0)
+const resetExtraFilters = () => {
+  setUrgencyFilter('all'); setCategoryFilter('all'); setLocationFilter('all'); setSortBy('date'); setSortDir('desc')
+}
+
+  const doUpdate = async (id, changes) => {
+    setIssues((prev) => prev.map((i) => (i.id === id ? { ...i, ...changes } : i)))
+    try { await updateIssueRow(id, { ...changes, hotelId: hotel.id }) } finally { reload({ soft: true }) }
+  }
+  const doDelete = async (id) => { await deleteIssueRow(id, hotel.id); reload({ soft: true }) }
+
+  if (creating) return <NewIssueForm hotel={hotel} user={user} onCancel={() => setCreating(false)} onSaved={() => { setCreating(false); reload({ soft: true }) }} />
+
+  if (activeIssue) return <IssueDetail issue={activeIssue} user={user} users={users} onClose={() => { setSelected(null); onFocusConsumed?.() }} onUpdate={doUpdate} onDelete={doDelete} />
+
+  return (
+    <div data-testid="issues-view">
+      <div className="rs-page-title">
+        <div><h1>Segnalazioni</h1><p>{hotel.name}</p></div>
+        {canUser(user, 'issues', 'create') && <Button variant="primary" icon="plus" onClick={() => setCreating(true)} data-testid="open-new-issue">Nuova</Button>}
+      </div>
+      <div className="rs-toolbar">
+  <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', gap: 8, alignItems: 'center' }}>
+    <TextInput icon="search" value={search} placeholder="Cerca ticket, camera, problema, categoria…" data-testid="issue-search" onChange={(e) => setSearch(e.target.value)} />
+    <Button variant={extraFilterCount ? 'primary' : 'ghost'} icon="filter" onClick={() => setSortOpen(true)} data-testid="issue-sort-filter">Filtra{extraFilterCount ? ` · ${extraFilterCount}` : ''}</Button>
+  </div>
+  <div className="rs-issue-filter-scroll" data-testid="issue-filters">
+          <Segmented value={filter} onChange={setFilter}
+            options={FILTERS.map(([k, l]) => [k, l, k === 'all' ? issues.length : (counts[k] || 0)])} />
+        </div>
+      </div>
+
+      {loading ? <Spinner label="Carico le segnalazioni…" /> : (
+        <>
+          <ListFetchNotice ok={fetchOk} offline={fetchOffline} hasItems={issues.length > 0} onRetry={() => reload({ soft: true })} resourceLabel="lista segnalazioni" />
+          {!(!fetchOk && !issues.length) && filtered.length === 0 ? (
+            <EmptyState icon="issues" title="Nessuna segnalazione">
+              {filter === 'all' ? `Non ci sono ancora segnalazioni per ${hotel.name}.` : 'Nessuna segnalazione con questo filtro.'}
+            </EmptyState>
+          ) : null}
+          {filtered.length > 0 ? (
+            <div className="rs-list rs-list--grid" data-testid="issues-list">
+              {filtered.map((issue) => (
+                <Card as="button" key={issue.id} className="rs-issue" onClick={() => setSelected(issue)} data-testid={`issue-${issue.id}`}>
+                  <span className={`rs-issue__accent ${URGENCY_META[issue.urgency]?.tone || 'mid'}`} />
+                  <span className="rs-issue__main">
+                    <span className="rs-issue__top">
+                      <span className="rs-issue__room">{issue.ticketCode ? `${issue.ticketCode} · ` : ""}{issue.room}</span>
+                      <Badge tone={ISSUE_STATUS_META[issue.status]?.tone}>{ISSUE_STATUS_META[issue.status]?.label || issue.status}</Badge>
+                    </span>
+                    <span className="rs-issue__title">{issue.title}</span>
+                    <span className="rs-issue__meta"><span><Icon name="clock" /> {issue.date}</span>{issue.category && <span>· {issue.category}</span>}{issue.status === 'done' && issue.completedBy && <span>· Risolta da <strong>{issue.completedBy}</strong></span>}</span>
+                  </span>
+                  {issue.photoData && <img className="rs-issue__photo" src={issue.photoData} alt="" />}
+                </Card>
+              ))}
+            </div>
+          ) : null}
+        </>
+      )}
+
+      <Sheet open={sortOpen} onClose={() => setSortOpen(false)} title="Filtra e ordina" className="rs-issue-filter-sheet">
+  <div className="rs-actions-stack" data-testid="issue-sort-filter-sheet">
+    <Field label="Ordina per"><select className="rs-select" value={sortBy} onChange={(e) => setSortBy(e.target.value)}>{ISSUE_SORT_OPTIONS.map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select></Field>
+    <fieldset className="rs-fieldset"><legend>Direzione</legend><div className="rs-chips"><button type="button" className={`rs-chip ${sortDir === 'asc' ? 'active' : ''}`} onClick={() => setSortDir('asc')}>↑ Crescente</button><button type="button" className={`rs-chip ${sortDir === 'desc' ? 'active' : ''}`} onClick={() => setSortDir('desc')}>↓ Decrescente</button></div></fieldset>
+    <fieldset className="rs-fieldset"><legend>Camera / zona</legend><div className="rs-chips">{[['all','Tutte'],['camera','Camere'],['zona','Zone']].map(([key,label]) => <button type="button" key={key} className={`rs-chip ${locationFilter === key ? 'active' : ''}`} onClick={() => setLocationFilter(key)}>{label}</button>)}</div></fieldset>
+    <fieldset className="rs-fieldset"><legend>Urgenza</legend><div className="rs-chips">{[['all','Tutte'],['alta','Alta'],['media','Media'],['bassa','Bassa']].map(([key,label]) => <button type="button" key={key} className={`rs-chip ${urgencyFilter === key ? 'active' : ''}`} onClick={() => setUrgencyFilter(key)}>{label}</button>)}</div></fieldset>
+    <Field label="Categoria"><select className="rs-select" value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)}><option value="all">Tutte le categorie</option>{ISSUE_CATEGORIES.map((item) => <option key={item} value={item}>{item}</option>)}</select></Field>
+    <div className="rs-form-actions"><Button variant="ghost" onClick={resetExtraFilters}>Ripristina</Button><Button variant="primary" onClick={() => setSortOpen(false)}>Applica · {filtered.length}</Button></div>
+  </div>
+</Sheet>
+
+    </div>
+  )
+}

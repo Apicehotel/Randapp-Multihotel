@@ -1,0 +1,309 @@
+.plant-page {
+  display: grid;
+  gap: 18px;
+}
+
+.plant-section {
+  display: grid;
+  gap: 12px;
+}
+
+.plant-section__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 2px;
+}
+
+.plant-section__head h2,
+.plant-subgroup h3 {
+  margin: 0;
+}
+
+.plant-section__head h2 {
+  font-size: 1.05rem;
+}
+
+.plant-subgroup {
+  display: grid;
+  gap: 8px;
+}
+
+.plant-subgroup h3 {
+  color: var(--text-muted, #8b94a7);
+  font-size: .78rem;
+  font-weight: 800;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+.plant-state-list {
+  display: grid;
+  gap: 8px;
+}
+
+.plant-state-card {
+  min-height: 62px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--border, rgba(148,163,184,.22));
+  border-radius: 14px;
+  background: var(--surface, rgba(255,255,255,.04));
+}
+
+.plant-state-card strong {
+  display: block;
+  line-height: 1.25;
+}
+
+.plant-state-card small {
+  display: block;
+  margin-top: 3px;
+  color: var(--text-muted, #8b94a7);
+}
+
+.plant-status {
+  flex: 0 0 auto;
+  min-width: 116px;
+  padding: 8px 10px;
+  border-radius: 999px;
+  font-size: .75rem;
+  font-weight: 900;
+  letter-spacing: .035em;
+  text-align: center;
+}
+
+.plant-status--on {
+  background: rgba(34,197,94,.14);
+  color: #22c55e;
+}
+
+.plant-status--off {
+  background: rgba(148,163,184,.13);
+  color: var(--text-muted, #94a3b8);
+}
+
+.plant-status--mixed {
+  background: rgba(245,158,11,.14);
+  color: #f59e0b;
+}
+
+.plant-status--unavailable {
+  background: rgba(239,68,68,.12);
+  color: #ef4444;
+}
+
+.plant-divider {
+  height: 1px;
+  margin: 4px 0;
+  background: var(--border, rgba(148,163,184,.18));
+}
+
+.temperature-page--v2 {
+  display: grid;
+  gap: 14px;
+}
+
+.temperature-section {
+  display: grid;
+  gap: 10px;
+}
+
+.temperature-section__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 2px;
+}
+
+.temperature-section__head h2 {
+  margin: 0;
+  font-size: 1.02rem;
+}
+
+.temperature-section__head span {
+  color: var(--text-muted, #8b94a7);
+  font-size: .78rem;
+  font-weight: 800;
+}
+
+.temperature-section--alert .temperature-section__head h2 {
+  color: #f59e0b;
+}
+
+.temperature-section--offline .temperature-section__head h2 {
+  color: #ef4444;
+}
+
+.temperature-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.temperature-summary > div {
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border, rgba(148,163,184,.22));
+  border-radius: 14px;
+  background: var(--surface, rgba(255,255,255,.04));
+}
+
+.temperature-summary span,
+.temperature-summary strong {
+  display: block;
+}
+
+.temperature-summary span {
+  color: var(--text-muted, #8b94a7);
+  font-size: .7rem;
+  font-weight: 800;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.temperature-summary strong {
+  margin-top: 3px;
+  font-size: 1.2rem;
+}
+
+.temperature-summary .has-warning strong {
+  color: #f59e0b;
+}
+
+.temperature-list--v2 {
+  display: grid;
+  gap: 10px;
+}
+
+.temperature-card--v2 {
+  min-height: 86px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 13px 14px;
+  border: 1px solid var(--border, rgba(148,163,184,.22));
+  border-radius: 16px;
+  background: var(--surface, rgba(255,255,255,.04));
+}
+
+.temperature-card--v2.in-alert {
+  border-color: rgba(245,158,11,.42);
+}
+
+.temperature-card--v2.is-offline {
+  border-color: rgba(239,68,68,.30);
+}
+
+.temperature-card__copy {
+  min-width: 0;
+}
+
+.temperature-card__copy strong,
+.temperature-card__copy small {
+  display: block;
+}
+
+.temperature-card__copy .temperature-status {
+  display: inline-flex;
+  margin-bottom: 6px;
+}
+
+.temperature-card__copy strong {
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.temperature-card__copy small {
+  margin-top: 5px;
+  color: var(--text-muted, #8b94a7);
+  line-height: 1.35;
+}
+
+.temperature-card__reading {
+  flex: 0 0 auto;
+  display: grid;
+  justify-items: end;
+  gap: 7px;
+}
+
+.temperature-card__reading b {
+  font-size: 1.12rem;
+  white-space: nowrap;
+}
+
+.temperature-card__reading b.normal {
+  color: #22c55e;
+}
+
+.temperature-card__reading b.alert {
+  color: #f59e0b;
+}
+
+.temperature-card__reading b.cold {
+  color: #38bdf8;
+}
+
+.temperature-card__reading b.muted {
+  color: var(--text-muted, #94a3b8);
+}
+
+.temperature-status {
+  min-width: 78px;
+  padding: 5px 8px;
+  border-radius: 999px;
+  font-size: .68rem;
+  font-weight: 900;
+  text-align: center;
+}
+
+.temperature-status--online {
+  background: rgba(34,197,94,.14);
+  color: #22c55e;
+}
+
+.temperature-status--alert {
+  background: rgba(245,158,11,.14);
+  color: #f59e0b;
+}
+
+.temperature-status--offline {
+  background: rgba(239,68,68,.12);
+  color: #ef4444;
+}
+
+@media (min-width: 760px) {
+  .plant-state-list,
+  .temperature-list--v2 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 520px) {
+  .plant-state-card {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .plant-status {
+    min-width: 0;
+  }
+
+  .temperature-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .temperature-card--v2 {
+    align-items: flex-start;
+  }
+
+  .temperature-card__reading {
+    justify-items: end;
+  }
+}

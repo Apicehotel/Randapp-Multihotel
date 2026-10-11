@@ -1,0 +1,48 @@
+{
+  "name": "randapp-multihotel",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": "24.x"
+  },
+  "scripts": {
+    "dev": "vite",
+    "start": "vite --host 0.0.0.0 --port 3000",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "node --test test/*.test.js",
+    "test:matrix": "node scripts/check-quality-matrix.mjs",
+    "test:critical": "node scripts/run-critical-tests.mjs",
+    "test:multihotel": "node --test test/multihotel-parity.test.js",
+    "test:phase0": "node --test test/phase-zero-foundations.test.js",
+    "test:phase1": "node --test test/phase-one-identity-authorization.test.js",
+    "test:e2e": "node test/e2e.mjs",
+    "test:device": "node test/device-acceptance.mjs",
+    "test:randui": "node --test test/randui-core-v1.test.js test/randui-guard-v1.test.js test/randui-block3-migration.test.js test/randui-visual-language-v1.test.js test/randui-planning-mobile-fix.test.js test/randui-telegram-navigation-v1.test.js test/randui-v2-full-completion.test.js",
+    "test:quality": "npm run test:matrix && npm run test:critical && npm run test:multihotel && npm test",
+    "test:randui:guard": "node --test test/randui-guard-v1.test.js",
+    "test:randui:migration": "node --test test/randui-block3-migration.test.js",
+    "test:randui:visual": "node --test test/randui-visual-language-v1.test.js test/randui-v2-full-completion.test.js",
+    "test:randui:planning": "node --test test/randui-planning-mobile-fix.test.js",
+    "test:randui:telegram": "node --test test/randui-telegram-navigation-v1.test.js",
+    "test:chaos": "node --test test/operational-chaos-gate.test.js"
+  },
+  "dependencies": {
+    "@opentelemetry/api": "1.9.1",
+    "@opentelemetry/exporter-trace-otlp-http": "0.221.0",
+    "@opentelemetry/sdk-trace-web": "2.10.0",
+    "@sentry/react": "10.71.0",
+    "@supabase/supabase-js": "^2.57.0",
+    "@tanstack/react-query": "^5.102.5",
+    "dexie": "^4.4.4",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.7.0",
+    "playwright": "^1.62.1",
+    "vite": "^7.1.0"
+  }
+}

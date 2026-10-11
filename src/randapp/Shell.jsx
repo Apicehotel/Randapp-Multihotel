@@ -1,0 +1,634 @@
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { fetchDirectory } from '../users-data.js'
+import { withTimeout } from '../async-timeout.js'
+import { lazyWithRetry } from '../lazy-retry.js'
+import { ViewErrorBoundary } from '../error-boundary.jsx'
+import { Button, Icon, IconButton, Sheet, EmptyState, Spinner, UiSizeControl, ThemeControl, ThemeSwitch } from './ui.jsx'
+import { canCreatePlanned, canSendUrgent, logoFor, hotelById } from './helpers.js'
+import { canUser } from '../permissions.js'
+import { buildNav, NAV_TARGET, VIEW_GUARDS } from './nav.js'
+import { fetchRoleNavigation, placementFor, subscribeRoleNavigation, VIEW_TO_NAV_KEY } from './role-navigation.js'
+import { buildPrimaryBottomNav } from './shell-navigation.js'
+import { prefetchViews, relatedPrefetchIds, scheduleNavPrefetch } from './nav-prefetch.js'
+import { resolveUserInterests } from './adaptive-layout.js'
+import { initSystemInsetsBridge } from './system-insets.js'
+import { contextualAddActions, contextualAddLabel } from './contextual-add.js'
+import { canManageTechnicianDirectory } from './technician-directory-policy.js'
+import RandUiPageBoundary from './randui/PageBoundary.jsx'
+import Home from './Home.jsx'
+import PresenceChip from './PresenceChip.jsx'
+import GlobalUrgentAlert from './GlobalUrgentAlert.jsx'
+import HousekeepingCompletionAlerts from './HousekeepingCompletionAlerts.jsx'
+import { RandDesktopSidebar, RandTopbar, RandMobileNav, RandSwipeStage } from './v2/RandChrome.jsx'
+import './new-issue-compact.css'
+import './randui-next.css'
+import './randui-material.css'
+import './randui-hubs.css'
+import './home-density.css'
+
+const Settings = lazyWithRetry(() => import('./Settings.jsx'))
+const Issues = lazyWithRetry(() => import('./Issues.jsx'))
+const ChatGroups = lazyWithRetry(() => import('./chat/ChatGroups.jsx'))
+const InventoryView = lazyWithRetry(() => import('./InventoryView.jsx'))
+const SupplyRequestsPortal = lazyWithRetry(() => import('./SupplyRequestsPortal.jsx'))
+const Profile = lazyWithRetry(() => import('./Profile.jsx'))
+const RandDesktopDownload = lazyWithRetry(() => import('./RandDesktopDownload.jsx'))
+const PlanningHub = lazyWithRetry(() => import('./PlanningHub.jsx'))
+const PlannedCreateSheet = lazyWithRetry(() => import('./PlannedCreateSheet.jsx'))
+const RemindersView = lazyWithRetry(() => import('./reminders/RemindersView.jsx'))
+const NotificationInbox = lazyWithRetry(() => import('./notifications/NotificationInbox.jsx'))
+const InsertLauncher = lazyWithRetry(() => import('./InsertLauncher.jsx'))
+const UrgentCreateSheet = lazyWithRetry(() => import('./UrgentCreateSheet.jsx'))
+const OperationsHub = lazyWithRetry(() => import('./operations/OperationsHub.jsx'))
+const InterventionsView = lazyWithRetry(() => import('./operations/InterventionsView.jsx'))
+const UrgentView = lazyWithRetry(() => import('./operations/UrgentView.jsx'))
+const TaskView = lazyWithRetry(() => import('./operations/TaskView.jsx'))
+const TemperatureView = lazyWithRetry(() => import('../temperature.jsx').then((module) => {
+  if (!module?.TemperatureSensors) throw new Error("Cannot destructure property 'TemperatureSensors' from null or undefined value")
+  return { default: ({ hotel }) => <div data-testid="temperature-view"><module.TemperatureSensors hotel={hotel} /></div> }
+}))
+const PlantView = lazyWithRetry(() => import('../temperature.jsx').then((module) => {
+  if (!module?.PlantStatus) throw new Error("Cannot destructure property 'PlantStatus' from null or undefined value")
+  return { default: ({ hotel }) => <div data-testid="plants-view"><module.PlantStatus hotel={hotel} /></div> }
+}))
+const HousekeepingView = lazyWithRetry(() => import('../housekeeping.jsx').then((module) => {
+  if (!module?.Housekeeping) throw new Error("Cannot destructure property 'Housekeeping' from null or undefined value")
+  return { default: ({ hotel, user }) => <div data-testid="housekeeping-view"><module.Housekeeping hotel={hotel} user={user} /></div> }
+}))
+const TechnicianDirectoryView = lazyWithRetry(() => import('./operations/UtilityLightViews.jsx').then((module) => {
+  if (!module?.TechnicianDirectoryView) throw new Error('Failed to fetch dynamically imported module')
+  return { default: module.TechnicianDirectoryView }
+}))
+const FeedbackView = lazyWithRetry(() => import('./operations/UtilityLightViews.jsx').then((module) => {
+  if (!module?.FeedbackView) throw new Error('Failed to fetch dynamically imported module')
+  return { default: module.FeedbackView }
+}))
+const PinView = lazyWithRetry(() => import('./operations/UtilityLightViews.jsx').then((module) => {
+  if (!module?.PinView) throw new Error('Failed to fetch dynamically imported module')
+  return { default: module.PinView }
+}))
+const ManualView = lazyWithRetry(() => import('./operations/UtilityLightViews.jsx').then((module) => {
+  if (!module?.ManualView) throw new Error('Failed to fetch dynamically imported module')
+  return { default: module.ManualView }
+}))
+const DIRECTORY_TIMEOUT_MS = 12000
+
+const ViewFallback = () => <Spinner label="Carico sezione…" />
+const HEADER_HOTEL_LABEL = { hotelgio: 'Giò', chocohotel: 'Choco', brigantino: 'Brigantino' }
+const initialsFor = (name = '') => name.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join('').toUpperCase() || 'R'
+
+function useDrawerSwipe({ open, setOpen }) {
+  const gesture = useRef(null)
+  return {
+    onPointerDown: (event) => {
+      if (event.pointerType === 'mouse' || (!open && event.clientX > 24)) return
+      gesture.current = { x: event.clientX, y: event.clientY }
+    },
+    onPointerUp: (event) => {
+      const start = gesture.current
+      gesture.current = null
+      if (!start) return
+      const dx = event.clientX - start.x
+      const dy = Math.abs(event.clientY - start.y)
+      if (dy > 56 || Math.abs(dx) < 72) return
+      if (!open && dx > 0) setOpen(true)
+      if (open && dx < 0) setOpen(false)
+    },
+    onPointerCancel: () => { gesture.current = null },
+  }
+}
+
+function NavGroups({ user, hotel, variant, current, onPick, navigationConfig }) {
+  const groups = useMemo(() => buildNav(user, hotel, navigationConfig, null), [user, hotel, navigationConfig])
+  const [openGroups, setOpenGroups] = useState(() => new Set(['principale', 'operativita']))
+
+  useEffect(() => {
+    if (variant !== 'drawer') return
+    const activeGroup = groups.find((group) => group.items.some((item) => item.id === current))
+    if (!activeGroup) return
+    setOpenGroups((previous) => {
+      if (previous.has(activeGroup.id)) return previous
+      const next = new Set(previous)
+      next.add(activeGroup.id)
+      return next
+    })
+  }, [variant, current, groups])
+
+  const toggleGroup = (groupId) => {
+    setOpenGroups((previous) => {
+      const next = new Set(previous)
+      if (next.has(groupId)) next.delete(groupId)
+      else next.add(groupId)
+      return next
+    })
+  }
+
+  if (variant === 'drawer') {
+    return groups.map((group) => {
+      const open = openGroups.has(group.id)
+      return (
+        <section key={group.id} className="rs-drawer__group" data-nav-group={group.id}>
+          <button type="button" className="rs-drawer__group-toggle" onClick={() => toggleGroup(group.id)} aria-expanded={open} aria-controls={`drawer-group-${group.id}`}>
+            <span>{group.label}</span><Icon name="chevronDown" />
+          </button>
+          {open && (
+            <div id={`drawer-group-${group.id}`} className="rs-drawer__group-items">
+              {group.items.map((item) => (
+                <button key={item.id} className={`rs-drawer__item ${current === item.id ? 'active' : ''}`} onClick={() => onPick(item)} data-testid={`drawer-${item.id}`}>
+                  <Icon name={item.icon} /><span>{item.label}</span><i><Icon name="chevronRight" /></i>
+                </button>
+              ))}
+            </div>
+          )}
+        </section>
+      )
+    })
+  }
+
+  return groups.map((group) => (
+    <div key={group.id} className="rs-sidebar__group">
+      <span className="rs-sidebar__label">{group.label}</span>
+      {group.items.map((item) => (
+        <button key={item.id} className={`rs-sidebar__item ${current === item.id ? 'active' : ''}`} onClick={() => onPick(item)} data-testid={`sidebar-${item.id}`} title={item.label}>
+          <Icon name={item.icon} /><span>{item.label}</span>
+        </button>
+      ))}
+    </div>
+  ))
+}
+
+export default function Shell({ session, initialDirectory = null, onLogout, onSwitchHotel }) {
+  const initialRows = initialDirectory?.hotelId === session.hotelId ? (initialDirectory.users || []) : []
+  const initialUser = initialRows.find((u) => u.auth_user_id === session.userId || u.id === session.userId || u.legacy_id === session.userId) || null
+  const [user, setUser] = useState(initialUser)
+  const [users, setUsers] = useState(initialRows)
+  const [directoryState, setDirectoryState] = useState(initialUser ? 'ready' : 'loading')
+  const [directoryRetry, setDirectoryRetry] = useState(0)
+  const [shellBootstrapped, setShellBootstrapped] = useState(Boolean(initialUser))
+  const [view, setView] = useState('home')
+  const [createSignal, setCreateSignal] = useState(0)
+  const [issueFocusId, setIssueFocusId] = useState(null)
+  const [operationalDetail, setOperationalDetail] = useState(null)
+  const [technicianCreateSignal, setTechnicianCreateSignal] = useState(0)
+  const [planningCreateRequest, setPlanningCreateRequest] = useState(null)
+  const [interventionCreateOpen, setInterventionCreateOpen] = useState(false)
+  const [personalizeSignal, setPersonalizeSignal] = useState(0)
+  const [drawer, setDrawer] = useState(false)
+  const [hotelSheet, setHotelSheet] = useState(false)
+  const [insertOpen, setInsertOpen] = useState(false)
+  const [urgentCreateOpen, setUrgentCreateOpen] = useState(false)
+  const [notificationsOpen, setNotificationsOpen] = useState(false)
+  const [notificationUnread, setNotificationUnread] = useState(0)
+  const [settings, setSettings] = useState(null)
+  const [cacheBusy, setCacheBusy] = useState(false)
+  const [cacheStatus, setCacheStatus] = useState('')
+  const [navigationConfig, setNavigationConfig] = useState({})
+  const verifiedHotelRef = useRef(initialUser ? session.hotelId : null)
+  const hotel = hotelById(session.hotelId)
+  const drawerSwipe = useDrawerSwipe({ open: drawer, setOpen: setDrawer })
+  const operationalDetailOpen = Boolean(operationalDetail)
+  const handleOperationalDetailChange = useCallback((detail) => setOperationalDetail(detail || null), [])
+
+  useEffect(() => initSystemInsetsBridge(), [])
+  useEffect(() => { setOperationalDetail(null) }, [view, hotel?.id])
+
+  useEffect(() => {
+    let active = true
+    if (!hotel) {
+      setUsers([])
+      setUser(null)
+      setDirectoryState('invalid-hotel')
+      return () => { active = false }
+    }
+    const seededRows = initialDirectory?.hotelId === session.hotelId ? (initialDirectory.users || []) : []
+    const seededUser = seededRows.find((u) => u.auth_user_id === session.userId || u.id === session.userId || u.legacy_id === session.userId) || null
+    const hasVerifiedSeed = Boolean(seededUser)
+
+    if (hasVerifiedSeed) {
+      setUsers(seededRows)
+      setUser(seededUser)
+      setDirectoryState('ready')
+      verifiedHotelRef.current = session.hotelId
+      setShellBootstrapped(true)
+    } else {
+      setDirectoryState('loading')
+    }
+
+    // Refresh the already-validated directory in background. A transient failure
+    // must not tear down a Shell that App.jsx has just verified for this hotel.
+    withTimeout(fetchDirectory(session.hotelId), DIRECTORY_TIMEOUT_MS, 'Directory struttura timeout')
+      .then(({ users: list }) => {
+        if (!active) return
+        const rows = list || []
+        const matchedUser = rows.find((u) => u.auth_user_id === session.userId || u.id === session.userId || u.legacy_id === session.userId) || null
+        setUsers(rows)
+        setUser(matchedUser)
+        setDirectoryState(matchedUser ? 'ready' : 'unauthorized')
+        if (matchedUser) {
+          verifiedHotelRef.current = session.hotelId
+          setShellBootstrapped(true)
+        }
+      }).catch((error) => {
+        if (!active) return
+        console.error('Directory struttura non disponibile', error)
+        // Keep an already verified shell usable during transient Supabase/Auth
+        // outages, but never reuse identity state across different hotels.
+        if ((hasVerifiedSeed || shellBootstrapped) && (seededUser || user) && verifiedHotelRef.current === session.hotelId) {
+          setDirectoryState('ready')
+          return
+        }
+        setUsers([])
+        setUser(null)
+        setDirectoryState('error')
+      })
+    return () => { active = false }
+  }, [session.hotelId, session.userId, hotel, directoryRetry, initialDirectory])
+
+  useEffect(() => {
+    let active = true
+    fetchRoleNavigation().then((config) => { if (active) setNavigationConfig(config) }).catch(() => {})
+    const unsubscribe = subscribeRoleNavigation((config) => { if (active) setNavigationConfig(config) })
+    return () => { active = false; unsubscribe?.() }
+  }, [])
+
+  useEffect(() => {
+    const onSaleCreated = (event) => {
+      if (planningCreateRequest?.kind !== 'sale') return
+      if (event.detail?.hotelId && event.detail.hotelId !== hotel?.id) return
+      const returnView = planningCreateRequest.returnView || 'planning-work'
+      setPlanningCreateRequest(null)
+      setSettings(null)
+      setView(returnView)
+    }
+    window.addEventListener('randapp-sale-booking-created', onSaleCreated)
+    return () => window.removeEventListener('randapp-sale-booking-created', onSaleCreated)
+  }, [planningCreateRequest, hotel?.id])
+
+  useEffect(() => { setInsertOpen(false) }, [view, hotel?.id])
+
+  const allowedHotels = useMemo(() => {
+    const set = new Set([session.hotelId, ...(user?.hotels || [])])
+    return Array.from(set).filter((id) => Boolean(hotelById(id)))
+  }, [session.hotelId, user])
+
+  const placement = useCallback((key) => placementFor(navigationConfig, user?.role, key), [navigationConfig, user?.role])
+
+  const viewAllowed = useCallback((targetView) => {
+    if (directoryState !== 'ready' || !user || !hotel) return false
+    const guard = VIEW_GUARDS[targetView]
+    if (guard && !guard(user, hotel)) return false
+    const key = VIEW_TO_NAV_KEY[targetView]
+    return !key || placement(key) !== 'off'
+  }, [directoryState, user, hotel, placement])
+
+  const safeView = useMemo(() => {
+    const order = ['home', 'operations', 'issues', 'chat', 'housekeeping', 'supplies', 'interventions', 'my-work', 'inventory', 'planning-work', 'urgent', 'reminders', 'temperature', 'plants', 'desktop-download', 'profile', 'manual', 'feedback']
+    return order.find((candidate) => viewAllowed(candidate)) || 'home'
+  }, [viewAllowed])
+
+  useEffect(() => {
+    if (user && !viewAllowed(view)) {
+      setPlanningCreateRequest(null)
+      setInterventionCreateOpen(false)
+      setSettings(null)
+      setView(safeView)
+    }
+  }, [user, view, viewAllowed, safeView])
+
+  const pick = (item) => {
+    setDrawer(false)
+    const target = NAV_TARGET[item.id]
+    const nextView = target?.view || item.id
+    if (target?.settings) { setSettings(target.settings); return }
+    if (!viewAllowed(nextView)) return
+    if (nextView === 'issues') setIssueFocusId(null)
+    setPlanningCreateRequest(null)
+    setInterventionCreateOpen(false)
+    setSettings(null)
+    setView(nextView)
+    if (target?.create) setCreateSignal((n) => n + 1)
+  }
+
+  const openIssueFromOperations = (issueId) => {
+    if (!viewAllowed('issues') || issueId == null) return
+    setDrawer(false)
+    setPlanningCreateRequest(null)
+    setInterventionCreateOpen(false)
+    setSettings(null)
+    setIssueFocusId(String(issueId))
+    setView('issues')
+  }
+
+  const openHomePersonalize = () => {
+    setDrawer(false)
+    if (!viewAllowed('home')) return
+    setPlanningCreateRequest(null)
+    setInterventionCreateOpen(false)
+    setSettings(null)
+    setView('home')
+    setPersonalizeSignal((n) => n + 1)
+  }
+
+  const clearAppCache = async () => {
+    if (cacheBusy) return
+    const ok = window.confirm('Pulisci la cache dell’app? Sessione, PIN e preferenze resteranno invariati.')
+    if (!ok) return
+    setCacheBusy(true)
+    setCacheStatus('Pulizia…')
+    try {
+      if ('caches' in window) {
+        const keys = await caches.keys()
+        await Promise.all(keys.map((key) => caches.delete(key)))
+      }
+      if ('serviceWorker' in navigator) {
+        const registrations = await navigator.serviceWorker.getRegistrations()
+        await Promise.all(registrations.map((registration) => registration.update().catch(() => undefined)))
+      }
+      setCacheStatus('Cache pulita')
+      window.setTimeout(() => window.location.reload(), 500)
+    } catch (error) {
+      console.error('Cache cleanup failed', error)
+      setCacheStatus('Errore pulizia')
+      setCacheBusy(false)
+    }
+  }
+
+  const requestPlanningCreate = (kind) => {
+    if (!viewAllowed('planning-work')) return
+    if (kind === 'sale' && !viewAllowed('planning-sale')) return
+    const returnView = view
+    setInterventionCreateOpen(false)
+    setSettings(null)
+    setView(kind === 'sale' ? 'planning-sale' : 'planning-work')
+    setPlanningCreateRequest((current) => ({ kind, nonce: (current?.nonce || 0) + 1, returnView }))
+  }
+
+  const pickInsert = (id) => {
+    setInsertOpen(false)
+    setSettings(null)
+    if (id === 'issue' && viewAllowed('issues')) {
+      setPlanningCreateRequest(null)
+      setInterventionCreateOpen(false)
+      setView('issues')
+      setCreateSignal((n) => n + 1)
+      return
+    }
+    if (id === 'urgent' && viewAllowed('urgent')) {
+      setPlanningCreateRequest(null)
+      setInterventionCreateOpen(false)
+      setUrgentCreateOpen(true)
+      return
+    }
+    if (id === 'intervention' && viewAllowed('interventions')) {
+      setPlanningCreateRequest(null)
+      setView('interventions')
+      setInterventionCreateOpen(true)
+      return
+    }
+    if (id === 'planning-work') {
+      requestPlanningCreate('work')
+      return
+    }
+    if (id === 'planning-sale') {
+      requestPlanningCreate('sale')
+      return
+    }
+    if (id === 'technician' && viewAllowed('technicians') && canManageTechnicianDirectory(user)) {
+      setPlanningCreateRequest(null)
+      setInterventionCreateOpen(false)
+      setView('technicians')
+      setTechnicianCreateSignal((n) => n + 1)
+    }
+  }
+
+  const userInterests = useMemo(() => resolveUserInterests(user), [user])
+  const bottomNav = useMemo(() => {
+    if (!user) return []
+    return buildPrimaryBottomNav({ placement, viewAllowed, interests: userInterests, user })
+  }, [user, placement, viewAllowed, userInterests])
+
+  useEffect(() => {
+    if (!shellBootstrapped || !bottomNav.length) return undefined
+    return scheduleNavPrefetch(bottomNav.map((item) => item.id))
+  }, [shellBootstrapped, bottomNav])
+
+  const warmNavDestination = useCallback((itemId) => {
+    void prefetchViews(relatedPrefetchIds(itemId))
+  }, [])
+
+  const addCapabilities = useMemo(() => ({
+    issue: Boolean(user && canUser(user, 'issues', 'create') && viewAllowed('issues')),
+    urgent: Boolean(user && canSendUrgent(user) && viewAllowed('urgent')),
+    intervention: Boolean(user && canUser(user, 'interventions', 'create') && viewAllowed('interventions')),
+    'planning-work': Boolean(user && canCreatePlanned(user) && viewAllowed('planning-work')),
+    'planning-sale': Boolean(user && canUser(user, 'planning_sale', 'create') && viewAllowed('planning-sale')),
+    technician: Boolean(user && viewAllowed('technicians') && canManageTechnicianDirectory(user)),
+  }), [user, viewAllowed])
+
+  const contextualActions = useMemo(() => contextualAddActions(view, addCapabilities), [view, addCapabilities])
+  const contextualActionIds = useMemo(() => settings !== null ? [] : contextualActions.map((action) => action.id), [settings, contextualActions])
+  const fabLabel = contextualAddLabel(contextualActions)
+  const openContextualAdd = () => {
+    if (contextualActionIds.length === 1) { pickInsert(contextualActionIds[0]); return }
+    if (contextualActionIds.length > 1) setInsertOpen(true)
+  }
+
+  const handlePlanningSectionChange = useCallback((section) => {
+    setView(section === 'sale' ? 'planning-sale' : 'planning-work')
+  }, [])
+
+  const handlePlanningCreateConsumed = useCallback((kind) => {
+    if (kind === 'work') setPlanningCreateRequest(null)
+  }, [])
+
+  if (directoryState === 'loading' && !shellBootstrapped) return <Spinner label="Verifico accesso alla struttura…" />
+  if (directoryState === 'loading') return <div data-testid="hotel-switch-loading"><Spinner label="Cambio struttura…" /></div>
+  if (directoryState === 'invalid-hotel') return <main className="rs-content"><EmptyState icon="lock" title="Struttura non valida">La sessione indica una struttura non riconosciuta. Esci e accedi di nuovo.</EmptyState></main>
+  if (directoryState === 'error') {
+    return (
+      <main className="rs-content" data-testid="directory-error">
+        <EmptyState icon="warning" title="Accesso non verificabile">Non riesco a verificare i permessi della struttura. Riprova con connessione disponibile.</EmptyState>
+        <div style={{ display: 'grid', placeItems: 'center', marginTop: 16 }}>
+          <Button type="button" variant="primary" onClick={() => setDirectoryRetry((n) => n + 1)} data-testid="directory-retry">
+            Riprova
+          </Button>
+        </div>
+      </main>
+    )
+  }
+  if (directoryState === 'unauthorized' || !user || !hotel) return <main className="rs-content"><EmptyState icon="lock" title="Accesso non consentito">L’utente della sessione non è abilitato per questa struttura.</EmptyState></main>
+
+  const renderView = () => {
+    if (settings !== null) return <Settings initialTab={settings} onExit={() => setSettings(null)} embedded />
+    if (!viewAllowed(view)) return <EmptyState icon="lock" title="Accesso non consentito">Questa funzione è disattivata per il ruolo {user?.role || ''}.</EmptyState>
+
+    let content = null
+    if (view === 'home') content = <Home user={user} hotel={hotel} personalizeSignal={personalizeSignal} onNavigate={(v) => pick({ id: v })} />
+    if (view === 'operations') content = <OperationsHub hotel={hotel} canIssues={viewAllowed('issues')} canInterventions={viewAllowed('interventions')} onOpen={(id, context) => id === 'issues' && context?.issueId != null ? openIssueFromOperations(context.issueId) : pick({ id })} />
+    if (view === 'issues') content = <Issues user={user} hotel={hotel} users={users} createSignal={createSignal} focusIssueId={issueFocusId} onFocusConsumed={() => setIssueFocusId(null)} onDetailChange={handleOperationalDetailChange} />
+    if (view === 'chat') content = <ChatGroups user={user} hotel={hotel} />
+    if (view === 'profile') content = <Profile user={user} hotel={hotel} />
+    if (view === 'desktop-download') content = <RandDesktopDownload />
+    if (view === 'interventions') content = <InterventionsView user={user} hotel={hotel} onDetailChange={handleOperationalDetailChange} />
+    if (view === 'inventory') content = <InventoryView user={user} hotel={hotel} />
+    if (view === 'supplies') content = <SupplyRequestsPortal user={user} hotel={hotel} onDetailChange={handleOperationalDetailChange} />
+    if (view === 'my-work') content = <TaskView user={user} hotel={hotel} canUrgent={viewAllowed('urgent')} canReminders={viewAllowed('reminders')} onOpen={(id) => pick({ id })} />
+    if (view === 'planning-work' || view === 'planning-sale') content = <PlanningHub key={planningCreateRequest?.kind==='sale'?`sale-create-${planningCreateRequest.nonce}`:'planning-default'} user={user} hotel={hotel} createRequest={planningCreateRequest} allowSale={viewAllowed('planning-sale')} onSectionChange={handlePlanningSectionChange} onCreateRequestConsumed={handlePlanningCreateConsumed} />
+    if (view === 'urgent') content = <UrgentView user={user} hotel={hotel} onDetailChange={handleOperationalDetailChange} />
+    if (view === 'reminders') content = <RemindersView user={user} hotel={hotel} onDetailChange={handleOperationalDetailChange} />
+    if (view === 'temperature') content = <TemperatureView hotel={hotel} />
+    if (view === 'plants') content = <PlantView hotel={hotel} />
+    if (view === 'housekeeping') content = <HousekeepingView user={user} hotel={hotel} />
+    if (view === 'technicians') content = <TechnicianDirectoryView user={user} hotel={hotel} createSignal={technicianCreateSignal} />
+    if (view === 'feedback-received') content = <FeedbackView user={user} hotel={hotel} received />
+    if (view === 'feedback') content = <FeedbackView user={user} hotel={hotel} />
+    if (view === 'pin') content = <PinView user={user} />
+    if (view === 'manual') content = <ManualView user={user} hotel={hotel} />
+
+    if (!content) return <EmptyState icon="sparkles" title="Sezione non disponibile">Questa destinazione non è configurata.</EmptyState>
+    return <RandUiPageBoundary pageId={view}>{content}</RandUiPageBoundary>
+  }
+
+  const userInitials = initialsFor(user?.name)
+  const DrawerHeader = (
+    <div className="rs-drawer__head rs-drawer__head--profile">
+      <button type="button" className="rs-drawer-profile" onClick={() => pick({ id: 'profile' })} data-testid="drawer-profile-header">
+        <span className="rs-profile-avatar">{userInitials}</span>
+        <span className="rs-drawer-profile__copy"><b>{user?.name || 'Utente'}</b><small>{user?.role || 'Personale'} · {hotel.name}</small></span>
+      </button>
+      <IconButton icon="close" label="Chiudi" onClick={() => setDrawer(false)} />
+    </div>
+  )
+
+  const showStructureSide = allowedHotels.length > 1 && placement('structure') === 'side'
+  const showCacheSide = placement('cache') === 'side'
+  const urgentHidden = operationalDetailOpen || drawer || hotelSheet || insertOpen || urgentCreateOpen || interventionCreateOpen || notificationsOpen
+
+  const handleBottom = (item) => {
+    if (item.href) {
+      try {
+        const target = new URL(item.href, window.location.origin)
+        if (target.origin !== window.location.origin) return
+        window.location.assign(target.href)
+      } catch { /* ignore malformed href */ }
+      return
+    }
+    if (item.id === 'structure') { setHotelSheet(true); return }
+    if (item.id === 'more') { setDrawer(true); return }
+    if (viewAllowed(item.id)) {
+      setPlanningCreateRequest(null)
+      setInterventionCreateOpen(false)
+      setSettings(null)
+      setView(item.id)
+    }
+  }
+
+  const isBottomActive = (item) => {
+    if (settings !== null || item.href || item.id === 'more') return false
+    if (item.id === 'operations') return ['operations', 'issues', 'interventions'].includes(view)
+    if (item.id === 'my-work') return ['my-work', 'urgent', 'reminders'].includes(view)
+    if (item.id === 'planning-work') return view === 'planning-work' || view === 'planning-sale'
+    return view === item.id
+  }
+
+  return (
+    <div className="rs-root" {...drawerSwipe}>
+      <div className={`rnx-app ${operationalDetailOpen ? 'rnx-app--operational-detail rs-app--operational-detail' : ''}`} data-operational-detail={operationalDetail?.kind || undefined}>
+        {operationalDetailOpen && !drawer && (
+          <IconButton
+            icon="menu"
+            label="Apri menu principale"
+            className="rs-operational-menu-trigger"
+            onClick={() => setDrawer(true)}
+            data-testid="operational-menu-trigger"
+          />
+        )}
+
+        {!operationalDetailOpen && (
+          <RandDesktopSidebar
+            brand={<><img src={logoFor(hotel.id)} alt={hotel.name} /><div className="rnx-brandcopy"><b>RandApp</b><small>{hotel.name}</small></div></>}
+            switcher={allowedHotels.length > 1 && placement('structure') !== 'off' ? (
+              <button className="rnx-structure-switch" onClick={() => setHotelSheet(true)} data-testid="sidebar-switch-hotel" title={`Struttura: ${hotel.name}`}><Icon name="hotel" /><span>{HEADER_HOTEL_LABEL[hotel.id] || hotel.name}</span><Icon name="chevronDown" /></button>
+            ) : null}
+            navigation={<NavGroups user={user} hotel={hotel} variant="sidebar" current={settings === null ? view : ''} onPick={pick} navigationConfig={navigationConfig} />}
+            preferences={<div className="rnx-sidebar-prefs">
+              {viewAllowed('home') && <button className="rnx-side-action" onClick={openHomePersonalize} data-testid="sidebar-personalize-home"><Icon name="sliders" /><span>Personalizza Home</span></button>}
+              <div className="rnx-prefrow"><span>Tema</span><ThemeControl /></div>
+              <div className="rnx-prefrow"><span>Dimensione</span><UiSizeControl /></div>
+              {placement('cache') !== 'off' && <button className="rnx-side-action" onClick={clearAppCache} disabled={cacheBusy} data-testid="sidebar-clear-cache"><Icon name="refresh" /><span>{cacheStatus || 'Pulisci cache'}</span></button>}
+            </div>}
+            onLogout={onLogout}
+          />
+        )}
+
+        {!operationalDetailOpen && (
+          <RandTopbar
+            hotel={<button className="rnx-hotelchip" onClick={() => allowedHotels.length > 1 && placement('structure') !== 'off' && setHotelSheet(true)} data-testid="hotel-chip" aria-label={allowedHotels.length > 1 ? `Cambia struttura. Attuale ${hotel.name}` : hotel.name}>
+              <img src={logoFor(hotel.id)} alt={hotel.name} />
+              <span><small>Struttura</small><b><span className="rs-hotelchip__name-mobile">{HEADER_HOTEL_LABEL[hotel.id] || hotel.name}</span><span className="rs-hotelchip__name-desktop">{hotel.name}</span></b></span>
+              {allowedHotels.length > 1 && placement('structure') !== 'off' && <Icon name="chevronDown" />}
+            </button>}
+            profile={<button type="button" className="rnx-profile" onClick={() => setDrawer(true)} aria-label={`Apri menu di ${user?.name || 'utente'}`} data-testid="header-profile-menu"><span className="rnx-profile__avatar">{userInitials}</span><span className="rnx-profile__copy"><b>{user?.name?.split(' ')[0] || 'Profilo'}</b><small>{user?.role || 'Utente'}</small></span></button>}
+            presence={<PresenceChip user={user} />}
+            themeSwitch={<ThemeSwitch />}
+            notifications={<span className="rnx-notify"><IconButton icon="bell" label="Notifiche" onClick={() => setNotificationsOpen(true)} data-testid="header-notifications" />{notificationUnread>0&&<span className="rnx-notify__badge">{notificationUnread>99?'99+':notificationUnread}</span>}</span>}
+          />
+        )}
+
+        {!operationalDetailOpen && <GlobalUrgentAlert hotel={hotel} user={user} hidden={urgentHidden || !viewAllowed('urgent')} onOpen={() => { if (viewAllowed('urgent')) { setSettings(null); setView('urgent') } }} />}
+
+        <RandSwipeStage items={bottomNav} isActive={isBottomActive} onPick={handleBottom}>
+          <main className="rnx-content" data-testid="main-content">
+            {!operationalDetailOpen && <HousekeepingCompletionAlerts />}
+            <ViewErrorBoundary viewId={settings !== null ? 'settings' : view}>
+              <Suspense fallback={<ViewFallback />}>{renderView()}</Suspense>
+            </ViewErrorBoundary>
+          </main>
+        </RandSwipeStage>
+
+        {!operationalDetailOpen && <RandMobileNav data-count="5" items={bottomNav} isActive={isBottomActive} onPick={handleBottom} onWarm={warmNavDestination} />}
+        {!operationalDetailOpen && contextualActionIds.length > 0 && <button className="rnx-fab" onClick={openContextualAdd} data-testid="fab-new" aria-label={fabLabel || 'Aggiungi'} title={fabLabel || 'Aggiungi'}><Icon name="plus" /></button>}
+      </div>
+
+      <ViewErrorBoundary viewId={insertOpen ? 'insert' : urgentCreateOpen ? 'urgent-create' : interventionCreateOpen ? 'intervention-create' : 'overlay'}>
+        {insertOpen && <Suspense fallback={<ViewFallback />}><InsertLauncher open={insertOpen} onClose={() => setInsertOpen(false)} hotel={hotel} user={user} onPick={pickInsert} actionIds={contextualActionIds} /></Suspense>}
+        {urgentCreateOpen && <Suspense fallback={<ViewFallback />}><UrgentCreateSheet open={urgentCreateOpen} onClose={() => setUrgentCreateOpen(false)} hotel={hotel} user={user} onSaved={() => { if (viewAllowed('urgent')) { setSettings(null); setView('urgent') } }} /></Suspense>}
+        {interventionCreateOpen && <Suspense fallback={<ViewFallback />}><PlannedCreateSheet open={interventionCreateOpen} onClose={() => setInterventionCreateOpen(false)} hotel={hotel} user={user} onSaved={() => { setInterventionCreateOpen(false); setSettings(null); setView('interventions') }} /></Suspense>}
+      </ViewErrorBoundary>
+
+      <Sheet open={hotelSheet} onClose={() => setHotelSheet(false)} title="Cambia struttura">
+        {allowedHotels.map((id) => {
+          const h = hotelById(id)
+          if (!h) return null
+          return <button key={id} className={`rs-hotelrow ${id === hotel.id ? 'selected' : ''}`} data-testid={`switch-hotel-${id}`} onClick={() => { onSwitchHotel(id); setHotelSheet(false) }}><img src={logoFor(id)} alt={h.name} /><span><b>{h.name}</b><small>{id === hotel.id ? 'Struttura attiva' : 'Passa a questa struttura'}</small></span><i>{id === hotel.id ? <Icon name="check" /> : <Icon name="chevronRight" />}</i></button>
+        })}
+      </Sheet>
+
+      <Sheet open={notificationsOpen} onClose={() => setNotificationsOpen(false)} title="Notifiche">
+        <ViewErrorBoundary viewId="notifications">
+          <Suspense fallback={<ViewFallback />}><NotificationInbox hotel={hotel} user={user} onUnreadChange={setNotificationUnread} canOpenUrgent={viewAllowed('urgent')} canManageReminders={viewAllowed('reminders')} onOpenUrgent={() => { setNotificationsOpen(false); setSettings(null); setView('urgent') }} onOpenReminders={() => { setNotificationsOpen(false); setSettings(null); setView('reminders') }} /></Suspense>
+        </ViewErrorBoundary>
+      </Sheet>
+
+      {drawer && (
+        <div className="rs-overlay rs-overlay--drawer" onClick={() => setDrawer(false)}>
+          <aside className="rs-drawer rs-drawer--telegram" onClick={(e) => e.stopPropagation()} data-testid="drawer" aria-label="Menu principale">
+            {DrawerHeader}
+            {showStructureSide && <button className="rs-drawer__switch" onClick={() => { setDrawer(false); setHotelSheet(true) }} data-testid="drawer-switch-hotel"><Icon name="hotel" /> <span>Cambia struttura</span> <i><Icon name="chevronRight" /></i></button>}
+            <div className="rs-drawer__scroll">
+              <NavGroups user={user} hotel={hotel} variant="drawer" current={settings === null ? view : ''} onPick={pick} navigationConfig={navigationConfig} />
+              <section className="rs-drawer__group">
+                <div className="rs-drawer__group-title">Preferenze</div>
+                {viewAllowed('home') && <button className="rs-drawer__item" onClick={openHomePersonalize} data-testid="drawer-personalize-home"><Icon name="sliders" /> <span>Personalizza Home</span><i><Icon name="chevronRight" /></i></button>}
+                <div className="rs-drawer__setting"><small>Tema</small><ThemeControl /></div>
+                <div className="rs-drawer__setting"><small>Dimensione interfaccia</small><UiSizeControl /></div>
+                {showCacheSide && <button className="rs-drawer__item" onClick={clearAppCache} disabled={cacheBusy} data-testid="drawer-clear-cache"><Icon name="refresh" /> <span>{cacheStatus || 'Pulisci cache'}</span><i><Icon name="chevronRight" /></i></button>}
+              </section>
+            </div>
+            <button className="rs-drawer__item rs-drawer__item--danger" onClick={onLogout} data-testid="drawer-logout"><Icon name="logout" /> <span>Esci</span></button>
+          </aside>
+        </div>
+      )}
+    </div>
+  )
+}

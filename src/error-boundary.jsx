@@ -1,0 +1,153 @@
+import { Component } from 'react'
+import { isDeploymentAssetError, recoverFromDeploymentAssetError } from './deployment-recovery.js'
+
+export function isRecoverableModuleError(error) {
+  return isDeploymentAssetError(error)
+}
+
+export default class AppErrorBoundary extends Component {
+  constructor(props) {
+    super(props)
+    this.state = { error: null }
+  }
+
+  static getDerivedStateFromError(error) {
+    return { error }
+  }
+
+  componentDidCatch(error, info) {
+    console.error('AppErrorBoundary', error, info?.componentStack)
+    import('./diagnostics-client.js').then(({ reportDiagnosticEvent }) => reportDiagnosticEvent({
+      severity: 'fatal',
+      kind: 'react-render',
+      message: error?.message || 'Errore render React',
+      detail: `${error?.stack || ''}\n${info?.componentStack || ''}`,
+    })).catch(() => {})
+    import('./external-telemetry.js').then(({ captureExternalError }) => captureExternalError(error, {
+      source: 'react-render',
+      componentStack: String(info?.componentStack || '').slice(0, 2000),
+    })).catch(() => {})
+
+    if (typeof window !== 'undefined' && isRecoverableModuleError(error)) {
+      recoverFromDeploymentAssetError(error).catch(() => {})
+    }
+  }
+
+  handleRetry = () => {
+    const error = this.state.error
+    // React.lazy caches a rejected dynamic import: remounting alone cannot recover
+    // a stale chunk. Force a real reload for deployment/module asset failures.
+    if (typeof window !== 'undefined' && isRecoverableModuleError(error)) {
+      window.location.reload()
+      return
+    }
+    this.setState({ error: null })
+  }
+
+  render() {
+    if (this.state.error) {
+      const moduleError = isRecoverableModuleError(this.state.error)
+      return (
+        <div style={{ padding: 24, fontFamily: 'system-ui, sans-serif', color: '#1b2420', background: '#f4f2ed', minHeight: '100vh' }}>
+          <h1 style={{ fontSize: 18, marginBottom: 8 }}>Si è verificato un errore</h1>
+          <p style={{ fontSize: 14, color: '#5c645e', marginBottom: 16 }}>
+            {moduleError
+              ? 'Un aggiornamento dell’app ha lasciato una sezione incompleta. Premi Riprova per ricaricare i moduli aggiornati.'
+              : 'RandApp ha registrato il problema nella diagnostica. Puoi provare a riprendere senza ricaricare oppure ricaricare l’app.'}
+          </p>
+          <pre style={{
+            whiteSpace: 'pre-wrap', wordBreak: 'break-word', background: '#fff', border: '1px solid #e4e0d6',
+            borderRadius: 10, padding: 12, fontSize: 12, color: '#b23a2e', marginBottom: 16,
+          }}>
+            {String(this.state.error?.message || this.state.error)}
+          </pre>
+          <button
+            type="button"
+            onClick={this.handleRetry}
+            style={{ padding: '10px 18px', marginRight: 8, borderRadius: 10, border: '1px solid #0e5c49', background: 'transparent', color: '#0e5c49', fontWeight: 700 }}
+          >
+            Riprova
+          </button>
+          <button
+            type="button"
+            onClick={() => window.location.reload()}
+            style={{ padding: '10px 18px', borderRadius: 10, border: 'none', background: '#0e5c49', color: '#fff', fontWeight: 700 }}
+          >
+            Ricarica l'app
+          </button>
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
+
+/**
+ * Isolates a single Shell destination so a render/chunk failure does not tear
+ * down the whole chrome (header, bottom nav, hotel switch).
+ */
+export class ViewErrorBoundary extends Component {
+  constructor(props) {
+    super(props)
+    this.state = { error: null }
+  }
+
+  static getDerivedStateFromError(error) {
+    return { error }
+  }
+
+  componentDidCatch(error, info) {
+    console.error('ViewErrorBoundary', this.props.viewId || 'view', error, info?.componentStack)
+    import('./diagnostics-client.js').then(({ reportDiagnosticEvent }) => reportDiagnosticEvent({
+      severity: 'error',
+      kind: 'react-view-render',
+      message: error?.message || 'Errore render sezione',
+      detail: `${this.props.viewId || ''}\n${error?.stack || ''}\n${info?.componentStack || ''}`,
+    })).catch(() => {})
+
+    if (typeof window !== 'undefined' && isRecoverableModuleError(error)) {
+      recoverFromDeploymentAssetError(error).catch(() => {})
+    }
+  }
+
+  componentDidUpdate(prevProps) {
+    if (prevProps.viewId !== this.props.viewId && this.state.error) {
+      this.setState({ error: null })
+    }
+  }
+
+  handleRetry = () => {
+    if (typeof window !== 'undefined' && isRecoverableModuleError(this.state.error)) {
+      window.location.reload()
+      return
+    }
+    this.setState({ error: null })
+  }
+
+  render() {
+    if (!this.state.error) return this.props.children
+    return (
+      <div className="rs-view-error" data-testid="view-error" style={{ padding: 24, textAlign: 'center' }}>
+        <h2 style={{ fontSize: 16, marginBottom: 8 }}>Questa sezione non si è caricata</h2>
+        <p style={{ fontSize: 14, color: '#5c645e', marginBottom: 16 }}>
+          Puoi riprovare la sezione senza uscire dall’app. Se il problema resta, ricarica RandApp.
+        </p>
+        <button
+          type="button"
+          data-testid="view-error-retry"
+          onClick={this.handleRetry}
+          style={{ padding: '10px 18px', marginRight: 8, borderRadius: 10, border: '1px solid #0e5c49', background: 'transparent', color: '#0e5c49', fontWeight: 700 }}
+        >
+          Riprova sezione
+        </button>
+        <button
+          type="button"
+          onClick={() => window.location.reload()}
+          style={{ padding: '10px 18px', borderRadius: 10, border: 'none', background: '#0e5c49', color: '#fff', fontWeight: 700 }}
+        >
+          Ricarica l'app
+        </button>
+      </div>
+    )
+  }
+}

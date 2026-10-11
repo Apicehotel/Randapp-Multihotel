@@ -1,0 +1,76 @@
+import { supabase } from './supabase.js'
+import { cacheRemoteCollection, enqueueMutation, findCachedHotelId, getCachedCollection, isTransientNetworkError, makeClientMutationId, makeOfflineId, registerOfflineHandler } from './offline-store.js'
+import { cleanupStagedPhoto, hydratePlannedPhotos, stagePhotoOffline, uploadPhotoValue } from './photo-storage.js'
+import { operationFailed, operationSaved } from './operation-feedback.js'
+
+const ENTITY='planned'
+const SECTION_INTERVENTION='intervento'
+const SECTION_PLANNING='planning'
+const onlineNow=()=>typeof navigator==='undefined'||navigator.onLine
+const isInlinePhoto=(value)=>typeof value==='string'&&value.startsWith('data:image/')
+const same=(a,b)=>JSON.stringify(a??null)===JSON.stringify(b??null)
+const syncValue=(item,key)=>key==='photoAfter'?item?.photoAfterPath:item?.[key]
+const sectionOf=(item)=>item?.section||SECTION_INTERVENTION
+const filterSection=(items,section)=>(items||[]).filter((item)=>sectionOf(item)===section)
+const assigneeIds=(items)=>[...new Set((Array.isArray(items)?items:[]).map((item)=>String(item?.id||item||'').trim()).filter(Boolean))]
+
+async function notifyTelegramInterventionBackup(item,phase='completed'){if(!supabase||!onlineNow()||!item?.id)return;try{const{data,error}=await supabase.functions.invoke('telegram-backup',{body:{kind:'intervention',record_id:item.id,phase}});if(error)console.warn('Telegram backup non consegnato',error);else if(data&&data.ok===false)console.warn('Telegram backup non consegnato',data.error)}catch(error){console.warn('Telegram backup non consegnato',error)}}
+
+async function notifyNewAssignees(item,previousAssignees=[]){
+  if(!supabase||!onlineNow()||sectionOf(item)!==SECTION_INTERVENTION)return
+  const previous=new Set(assigneeIds(previousAssignees))
+  const added=assigneeIds(item.assignees).filter((id)=>!previous.has(id))
+  if(!added.length)return
+  try{
+    const{error}=await supabase.functions.invoke('assignment-notify',{body:{hotel_id:item.hotelId,intervention_id:item.id,assignee_ids:added}})
+    if(error)console.warn('Notifica assegnazione non consegnata',error)
+  }catch(error){console.warn('Notifica assegnazione non consegnata',error)}
+}
+
+function fromRow(row){return{id:row.id,ticketNumber:row.ticket_number||null,ticketCode:row.ticket_code||null,hotelId:row.hotel_id,section:row.sezione||SECTION_INTERVENTION,location:row.camera,locationMode:row.location_mode||'zona',category:row.categoria,notes:row.note,scheduledAt:row.programmato_dal?new Date(row.programmato_dal).getTime():null,scheduledUntil:row.programmato_al?new Date(row.programmato_al).getTime():null,assignees:row.assegnatari||[],status:row.stato||'pending',rooms:row.camere||null,roomsDone:row.camere_fatte||{},createdBy:row.creato_da,createdAt:row.creato_il?new Date(row.creato_il).getTime():Date.now(),updatedAt:row.updated_at?new Date(row.updated_at).getTime():null,clientMutationId:row.mutation_id||null,completedBy:row.completato_da||null,completedAt:row.completato_il?new Date(row.completato_il).getTime():null,pieceReplaced:row.pezzo_sostituito||null,photoAfterPath:row.foto_dopo&&!isInlinePhoto(row.foto_dopo)?row.foto_dopo:null,photoAfter:isInlinePhoto(row.foto_dopo)?row.foto_dopo:null,toFinishBy:row.da_finire_da||null,toFinishAt:row.da_finire_il?new Date(row.da_finire_il).getTime():null,technicianExpectedArrival:row.tecnico_arrivo_previsto?new Date(row.tecnico_arrivo_previsto).getTime():null}}
+function toRow(item){const row={},set=(c,v)=>{if(v!==undefined)row[c]=v};set('hotel_id',item.hotelId);set('sezione',item.section);set('mutation_id',item.clientMutationId);set('camera',item.location);set('location_mode',item.locationMode);set('categoria',item.category);set('note',item.notes);if(item.scheduledAt!==undefined)row.programmato_dal=item.scheduledAt?new Date(item.scheduledAt).toISOString():null;if(item.scheduledUntil!==undefined)row.programmato_al=item.scheduledUntil?new Date(item.scheduledUntil).toISOString():null;set('assegnatari',item.assignees);set('stato',item.status);set('camere',item.rooms);set('camere_fatte',item.roomsDone);set('creato_da',item.createdBy);set('completato_da',item.completedBy);set('pezzo_sostituito',item.pieceReplaced);set('foto_dopo',item.photoAfterPath!==undefined?item.photoAfterPath:item.photoAfter);set('da_finire_da',item.toFinishBy);if(item.toFinishAt!==undefined)row.da_finire_il=item.toFinishAt?new Date(item.toFinishAt).toISOString():null;if(item.technicianExpectedArrival!==undefined)row.tecnico_arrivo_previsto=item.technicianExpectedArrival?new Date(item.technicianExpectedArrival).toISOString():null;if(item.status==='done'&&item.completedAt)row.completato_il=new Date(item.completedAt).toISOString();return row}
+async function prepareForUpload(item){const next={...item};if(item.photoAfter){next.photoAfterPath=await uploadPhotoValue(item.photoAfter,{hotelId:item.hotelId,entity:'planned',kind:'after'});delete next.photoAfter}return next}
+async function stageForOffline(item){const queued={...item};if(item.photoAfter)queued.photoAfter=await stagePhotoOffline(item.photoAfter,{hotelId:item.hotelId,entity:'planned',kind:'after'});return queued}
+async function withSyncBase(id,hotelId,changes){if(String(id).startsWith('offline-'))return changes;const cached=await getCachedCollection(ENTITY,hotelId),base=cached.find((item)=>item.id===id);if(!base?.updatedAt)return changes;const baseValues={};for(const key of Object.keys(changes))if(!key.startsWith('_')&&key!=='hotelId'&&(key in base||key==='photoAfter'))baseValues[key]=syncValue(base,key);return{...changes,_syncBaseUpdatedAt:base.updatedAt,_syncBaseValues:baseValues}}
+async function deleteBase(id,hotelId){if(String(id).startsWith('offline-'))return null;const cached=await getCachedCollection(ENTITY,hotelId),base=cached.find((item)=>item.id===id);return base?.updatedAt?{_syncBaseUpdatedAt:base.updatedAt}:null}
+function conflictError(fields){const error=new Error(`Conflitto di sincronizzazione: ${fields.join(', ')}`);error.code='OFFLINE_CONFLICT';error.conflictFields=fields;return error}
+async function existingByMutation(mutationId){if(!mutationId)return null;const{data,error}=await supabase.from('interventi').select('*').eq('mutation_id',mutationId).maybeSingle();if(error)throw error;return data||null}
+async function dbInsert(item){const mutationId=item.clientMutationId||makeClientMutationId();const existing=await existingByMutation(mutationId);if(existing){await cleanupStagedPhoto(item.photoAfter);return hydratePlannedPhotos(fromRow(existing))}const prepared=await prepareForUpload({...item,clientMutationId:mutationId});let{data,error}=await supabase.from('interventi').insert(toRow(prepared)).select().single();if(error?.code==='23505'&&mutationId){data=await existingByMutation(mutationId);error=null}if(error)throw error;await cleanupStagedPhoto(item.photoAfter);const created=await hydratePlannedPhotos(fromRow(data));await notifyNewAssignees(created);if(created.photoAfterPath)await notifyTelegramInterventionBackup(created,'completed');return created}
+async function dbUpdate(id,changes){let currentApp=null;if(changes._syncBaseUpdatedAt||changes.assignees!==undefined){const{data:current,error:readError}=await supabase.from('interventi').select('*').eq('id',id).single();if(readError)throw readError;currentApp=fromRow(current);if(changes._syncBaseUpdatedAt){const fields=Object.keys(changes._syncBaseValues||{}).filter((key)=>!same(syncValue(currentApp,key),changes._syncBaseValues[key]));if(fields.length)throw conflictError(fields)}}const prepared=await prepareForUpload(changes);const{data,error}=await supabase.from('interventi').update(toRow(prepared)).eq('id',id).select().single();if(error)throw error;await cleanupStagedPhoto(changes.photoAfter);const updated=await hydratePlannedPhotos(fromRow(data));if(changes.assignees!==undefined)await notifyNewAssignees(updated,currentApp?.assignees||[]);if(changes.photoAfter&&updated.photoAfterPath)await notifyTelegramInterventionBackup(updated,'completed');return updated}
+async function dbDelete(id,meta=null){if(meta?._syncBaseUpdatedAt){const{data:current,error:readError}=await supabase.from('interventi').select('updated_at').eq('id',id).maybeSingle();if(readError)throw readError;if(current&&new Date(current.updated_at).getTime()!==meta._syncBaseUpdatedAt)throw conflictError(['eliminazione'])}const{error}=await supabase.from('interventi').delete().eq('id',id);if(error)throw error;return true}
+registerOfflineHandler(ENTITY,async(op,targetId)=>op.action==='create'?dbInsert(op.payload):op.action==='update'?dbUpdate(targetId,{...op.payload,hotelId:op.hotelId}):dbDelete(targetId,op.payload))
+
+async function fetchAll(hotelId){
+  if(!supabase||!onlineNow())return{items:await getCachedCollection(ENTITY,hotelId),ok:false,offline:true}
+  try{
+    const{data,error}=await supabase.from('interventi').select('*').eq('hotel_id',hotelId).order('creato_il',{ascending:false})
+    if(error)throw error
+    const hydrated=await Promise.all((data||[]).map((row)=>hydratePlannedPhotos(fromRow(row))))
+    return{items:await cacheRemoteCollection(ENTITY,hotelId,hydrated),ok:true}
+  }catch(error){return{items:await getCachedCollection(ENTITY,hotelId),ok:false,offline:isTransientNetworkError(error)}}
+}
+async function fetchSection(hotelId,section){const result=await fetchAll(hotelId);return{...result,items:filterSection(result.items,section)}}
+export async function fetchPlanned(hotelId){return fetchSection(hotelId,SECTION_INTERVENTION)}
+export async function fetchPlanning(hotelId){return fetchSection(hotelId,SECTION_PLANNING)}
+/** Lean hub/list preview: no photo hydration, does not overwrite the full planned cache. */
+const HUB_PLANNED_COLUMNS='id,hotel_id,sezione,camera,categoria,note,programmato_dal,assegnatari,stato,creato_da,creato_il,updated_at,completato_da,completato_il'
+export async function peekCachedPlanned(hotelId,section=SECTION_INTERVENTION){
+  return filterSection(await getCachedCollection(ENTITY,hotelId),section)
+}
+export async function fetchPlannedForHub(hotelId,section=SECTION_INTERVENTION){
+  const cached=await peekCachedPlanned(hotelId,section)
+  if(!supabase||!onlineNow())return{items:cached,ok:false,offline:true}
+  try{
+    const{data,error}=await supabase.from('interventi').select(HUB_PLANNED_COLUMNS).eq('hotel_id',hotelId).order('creato_il',{ascending:false})
+    if(error)throw error
+    return{items:filterSection((data||[]).map(fromRow),section),ok:true}
+  }catch(error){
+    return{items:cached,ok:false,offline:isTransientNetworkError(error)}
+  }
+}
+
+export async function insertPlanned(item){const nextItem={section:SECTION_INTERVENTION,...item,clientMutationId:item.clientMutationId||makeClientMutationId()};if(!supabase||!onlineNow()){const tempId=makeOfflineId('offline-planned'),payload={...nextItem,createdAt:nextItem.createdAt||Date.now()},queued=await stageForOffline(payload);return enqueueMutation({entity:ENTITY,hotelId:nextItem.hotelId,action:'create',payload:queued,cachePayload:payload,tempId})}try{const created=await dbInsert(nextItem);await cacheRemoteCollection(ENTITY,nextItem.hotelId,[created,...(await getCachedCollection(ENTITY,nextItem.hotelId)).filter(x=>x.id!==created.id)]);operationSaved(created.section===SECTION_PLANNING?'Pianificazione salvata':'Intervento salvato');return created}catch(error){if(isTransientNetworkError(error)){const tempId=makeOfflineId('offline-planned'),payload={...nextItem,createdAt:nextItem.createdAt||Date.now()},queued=await stageForOffline(payload);return enqueueMutation({entity:ENTITY,hotelId:nextItem.hotelId,action:'create',payload:queued,cachePayload:payload,tempId})}operationFailed(error,'Intervento non salvato');throw error}}
+export async function insertPlanning(item){return insertPlanned({...item,section:SECTION_PLANNING})}
+export async function updatePlannedRow(id,changes){const hotelId=changes.hotelId||await findCachedHotelId(ENTITY,id);if(!supabase||!onlineNow()||String(id).startsWith('offline-')){const based=await withSyncBase(id,hotelId,{...changes,hotelId}),queued=await stageForOffline(based);return enqueueMutation({entity:ENTITY,hotelId,action:'update',payload:queued,cachePayload:changes,targetId:id})}try{const updated=await dbUpdate(id,{...changes,hotelId});const cached=await getCachedCollection(ENTITY,hotelId);await cacheRemoteCollection(ENTITY,hotelId,cached.map(item=>item.id===id?updated:item));operationSaved(changes.status==='done'?'Intervento completato':'Intervento aggiornato');return updated}catch(error){if(isTransientNetworkError(error)){const based=await withSyncBase(id,hotelId,{...changes,hotelId}),queued=await stageForOffline(based);return enqueueMutation({entity:ENTITY,hotelId,action:'update',payload:queued,cachePayload:changes,targetId:id})}operationFailed(error,'Intervento non aggiornato');throw error}}
+export async function deletePlannedRow(id,hotelId=null){const resolved=hotelId||await findCachedHotelId(ENTITY,id);if(!supabase||!onlineNow()||String(id).startsWith('offline-'))return enqueueMutation({entity:ENTITY,hotelId:resolved,action:'delete',payload:await deleteBase(id,resolved),targetId:id});try{const ok=await dbDelete(id);const cached=await getCachedCollection(ENTITY,resolved);await cacheRemoteCollection(ENTITY,resolved,cached.filter(item=>item.id!==id));operationSaved('Intervento eliminato');return ok}catch(error){if(isTransientNetworkError(error))return enqueueMutation({entity:ENTITY,hotelId:resolved,action:'delete',payload:await deleteBase(id,resolved),targetId:id});operationFailed(error,'Intervento non eliminato');throw error}}
+export function subscribePlanned(hotelId,onChange){const onOffline=(event)=>{if(event.detail?.entity===ENTITY&&event.detail?.hotelId===hotelId)onChange({eventType:'OFFLINE_SYNC'})};if(typeof window!=='undefined')window.addEventListener('apice-offline-data-changed',onOffline);let channel=null;if(supabase)channel=supabase.channel('apice-interventi-'+hotelId).on('postgres_changes',{event:'*',schema:'public',table:'interventi',filter:`hotel_id=eq.${hotelId}`},onChange).subscribe();return()=>{if(channel)supabase.removeChannel(channel);if(typeof window!=='undefined')window.removeEventListener('apice-offline-data-changed',onOffline)}}

@@ -1,0 +1,112 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
+import { buildPrimaryBottomNav, PRIMARY_OPERATIONAL_NAV } from '../src/randapp/shell-navigation.js'
+import { applySystemInsets, clearSystemInsets } from '../src/randapp/system-insets.js'
+
+const read = (path) => readFile(new URL(`../${path}`, import.meta.url), 'utf8')
+
+const allBottom = (key) => ['home', 'planning_work', 'chat', ...PRIMARY_OPERATIONAL_NAV.map((item) => item.key)].includes(key) ? 'bottom' : 'off'
+const allAllowed = () => true
+
+test('adaptive primary mobile navigation keeps five structural slots with Home in slot 3 and Altro in slot 5', () => {
+  assert.ok(PRIMARY_OPERATIONAL_NAV.length >= 3)
+  const nav = buildPrimaryBottomNav({ placement: allBottom, viewAllowed: allAllowed })
+
+  assert.equal(nav.length, 5)
+  assert.deepEqual(nav.map(({ slot }) => slot), [1, 2, 3, 4, 5])
+  assert.equal(nav.find((item) => item.id === 'operations')?.slot, 1)
+  assert.equal(nav.find((item) => item.id === 'planning-work')?.slot, 2)
+  assert.equal(nav.find((item) => item.id === 'home')?.slot, 3)
+  assert.equal(nav.find((item) => item.id === 'chat')?.slot, 4)
+  assert.equal(nav.find((item) => item.id === 'more')?.slot, 5)
+})
+
+test('permissions may hide a contextual destination without moving Home or Altro anchors', () => {
+  const nav = buildPrimaryBottomNav({
+    placement: (key) => key === 'chat' ? 'off' : allBottom(key),
+    viewAllowed: (id) => id !== 'inventory',
+  })
+
+  assert.equal(nav.some((item) => item.id === 'inventory'), false)
+  assert.equal(nav.find((item) => item.id === 'home')?.slot, 3)
+  assert.equal(nav.find((item) => item.id === 'more')?.slot, 5)
+})
+
+test('adaptive App Shell CSS uses effective browser/native insets and Telegram layer owns fixed navigation slots', async () => {
+  const [css, telegram] = await Promise.all([
+    read('src/randapp/adaptive-layout.css'),
+    read('src/randapp/telegram-navigation.css'),
+  ])
+  assert.match(css, /--rs-native-safe-bottom:\s*0px/)
+  assert.match(css, /--rs-adaptive-safe-bottom:\s*max\(env\(safe-area-inset-bottom, 0px\), var\(--rs-native-safe-bottom\)\)/)
+  assert.doesNotMatch(css, /min\(env\(safe-area-inset-bottom/)
+  assert.match(css, /grid-template-columns:\s*repeat\(5,/)
+  assert.match(telegram, /\.rs-bottomnav--telegram \.rs-navbtn\[data-slot='3'\]\s*\{\s*grid-column:\s*3;/)
+  assert.match(telegram, /\.rs-bottomnav--telegram \.rs-navbtn\[data-slot='5'\]\s*\{\s*grid-column:\s*5;/)
+  assert.match(css, /@media \(min-width:\s*1200px\)/)
+  assert.match(css, /\.rs-bottomnav, \.rs-navfab \{ display: none; \}/)
+})
+
+test('top safe area has one owner so iOS does not double the notch clearance', async () => {
+  const css = await read('src/randapp/adaptive-layout.css')
+  assert.match(css, /\.rs-app\s*\{\s*padding-top:\s*0;\s*\}/)
+  assert.match(css, /\.rs-header\s*\{[\s\S]*padding-top:\s*calc\(var\(--rs-adaptive-safe-top\) \+ 6px\)/)
+  assert.doesNotMatch(css, /\.rs-app\s*\{\s*padding-top:\s*var\(--rs-adaptive-safe-top\)/)
+})
+
+test('phone and tablet pin the operational header while the body scrolls', async () => {
+  const css = await read('src/randapp/adaptive-layout.css')
+  assert.match(css, /--rs-app-viewport-height:\s*100dvh/)
+  assert.match(css, /@media \(max-width:\s*1199px\)[\s\S]*\.rs-app\s*\{[\s\S]*height:\s*var\(--rs-app-viewport-height\)/)
+  assert.match(css, /@media \(max-width:\s*1199px\)[\s\S]*\.rs-app\s*\{[\s\S]*overflow:\s*hidden/)
+  assert.match(css, /@media \(max-width:\s*1199px\)[\s\S]*\.rs-app(?:,\s*\.rs-app\.rs-app--with-side)?\s*\{[\s\S]*display:\s*flex/)
+  assert.match(css, /@media \(max-width:\s*1199px\)[\s\S]*\.rs-content\s*\{[\s\S]*overflow-y:\s*auto/)
+  assert.match(css, /@media \(max-width:\s*1199px\)[\s\S]*\.rs-header\s*\{[\s\S]*flex:\s*0 0 auto/)
+})
+
+test('native inset bridge writes and clears CSS variables for a future Android wrapper', () => {
+  const values = new Map()
+  const previousDocument = global.document
+  global.document = {
+    documentElement: {
+      dataset: {},
+      style: {
+        setProperty: (name, value) => values.set(name, value),
+        removeProperty: (name) => values.delete(name),
+      },
+    },
+  }
+
+  try {
+    applySystemInsets({ top: 24, right: 0, bottom: 48, left: 0 })
+    assert.equal(values.get('--rs-native-safe-top'), '24px')
+    assert.equal(values.get('--rs-native-safe-bottom'), '48px')
+    assert.equal(global.document.documentElement.dataset.systemInsets, 'native')
+    clearSystemInsets()
+    assert.equal(values.has('--rs-native-safe-bottom'), false)
+  } finally {
+    global.document = previousDocument
+  }
+})
+
+test('Shell and document keep the adaptive PWA/native-ready navigation contract wired through RandUI foundation', async () => {
+  const [shell, chrome, html, main, foundation] = await Promise.all([
+    read('src/randapp/Shell.jsx'),
+    read('src/randapp/v2/RandChrome.jsx'),
+    read('index.html'),
+    read('src/main.jsx'),
+    read('src/randapp/randui/foundation.css'),
+  ])
+  assert.match(shell, /buildPrimaryBottomNav/)
+  assert.match(shell, /resolveUserInterests/)
+  assert.match(shell, /initSystemInsetsBridge/)
+  assert.match(chrome, /data-count="5"/)
+  assert.match(chrome, /data-slot=\{item\.slot\}/)
+  assert.match(chrome, /aria-label="Navigazione principale"/)
+  assert.match(main, /import ['"]\.\/randapp\/randui\/foundation\.css['"]/)
+  assert.match(foundation, /@import ['"]\.\.\/adaptive-layout\.css['"]/)
+  assert.doesNotMatch(shell, /app-shell-foundation\.css/)
+  assert.match(html, /viewport-fit=cover/)
+  assert.doesNotMatch(html, /rs-bottomnav\[data-count=/)
+})

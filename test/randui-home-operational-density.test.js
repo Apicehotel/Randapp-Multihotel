@@ -1,0 +1,43 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
+
+const read = (path) => readFile(new URL(`../${path}`, import.meta.url), 'utf8')
+
+test('Home exposes stat count so three operational counters can stay on one mobile row', async () => {
+  const home = await read('src/randapp/Home.jsx')
+  const css = await read('src/randapp/randui-next.css')
+  assert.match(home, /data-count=\{stats\.length\}/)
+  assert.match(css, /\.rnx-kpi-grid\[data-count="3"\]\s*\{\s*grid-template-columns:\s*repeat\(3,/)
+})
+
+test('Home distinguishes urgent alerts from high-priority issues', async () => {
+  const home = await read('src/randapp/Home.jsx')
+  assert.match(home, /label:'Allarmi'/)
+  assert.match(home, /eyebrow:'Allarme'/)
+  assert.match(home, /item\.urgency === 'alta' \? 92/)
+})
+
+test('Home has no create button of its own: new issue stays an authorized quick action', async () => {
+  const home = await read('src/randapp/Home.jsx')
+  const css = await read('src/randapp/randui-next.css')
+  assert.doesNotMatch(home, /canCreateIssues&&<Button/)
+  assert.match(home, /canCreateIssues\?\['new-issue','plus','Nuova'\]:null/)
+  assert.match(css, /\.rnx-app:has\(\.rnx-home\) \.rnx-fab\s*\{\s*display:none/)
+})
+
+test('Home density keeps Piccolo Normale Grande compatible', async () => {
+  const css = await read('src/randapp/randui-next.css')
+  assert.match(css, /html\[data-ui-size='large'\] \.rnx-kpi-grid/)
+  assert.match(css, /html\[data-ui-size='large'\] \.rnx-priority/)
+  assert.match(css, /@media\s*\(max-width:\s*520px\)/)
+})
+
+test('Home component uses the canonical RandUI Next stylesheet instead of embedded HOME13 styles', async () => {
+  const home = await read('src/randapp/Home.jsx')
+  const shell = await read('src/randapp/Shell.jsx')
+  assert.match(shell, /import ['"]\.\/randui-next\.css['"]/)
+  assert.doesNotMatch(home, /home-operational\.css/)
+  assert.doesNotMatch(home, /HOME13_STYLES/)
+  assert.doesNotMatch(home, /<style>/)
+})

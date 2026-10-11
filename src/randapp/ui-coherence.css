@@ -1,0 +1,219 @@
+/* RandApp Point 12 — final UI coherence layer.
+   Loaded last on purpose: feature CSS may specialize layout, but these rules own
+   interaction, accessibility and control consistency across every module. */
+
+:root {
+  --rs-control-h: calc(46px * var(--rs-scale));
+  --rs-control-h-sm: calc(40px * var(--rs-scale));
+  --rs-control-h-lg: calc(52px * var(--rs-scale));
+  --rs-focus: 0 0 0 3px rgba(34, 211, 238, .24);
+  --rs-page-gap: calc(16px * var(--rs-scale));
+}
+
+html { min-height: 100%; overflow-x: clip; }
+body { min-height: 100dvh; min-height: -webkit-fill-available; }
+
+/* Versioned hotel identities: brand changes accent only, never authority or status semantics. */
+html[data-hotel-identity-version='1'][data-hotel='hotelgio'] { --rs-accent: #6654c7; --rs-accent-strong: #4f3eaa; }
+html[data-hotel-identity-version='1'][data-hotel='chocohotel'] { --rs-accent: #925b32; --rs-accent-strong: #704224; }
+html[data-hotel-identity-version='1'][data-hotel='brigantino'] { --rs-accent: #126b87; --rs-accent-strong: #0b536b; }
+
+/* One interaction contract for every native/custom control. */
+button,
+[role='button'],
+input,
+select,
+textarea {
+  -webkit-tap-highlight-color: transparent;
+}
+
+button,
+[role='button'] {
+  touch-action: manipulation;
+}
+
+button:focus-visible,
+[role='button']:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--rs-cyan);
+  outline-offset: 2px;
+}
+
+.rs-btn--md { min-height: var(--rs-control-h); }
+.rs-btn--sm { min-height: var(--rs-control-h-sm); }
+.rs-btn--lg { min-height: var(--rs-control-h-lg); }
+.rs-btn--block { width: 100%; }
+.rs-btn .rs-icon,
+.rs-btn > span { pointer-events: none; }
+.rs-iconbtn { min-width: 44px; min-height: 44px; }
+
+.rs-btn[aria-busy='true'],
+.rs-btn.is-loading {
+  cursor: progress;
+  pointer-events: none;
+}
+
+.rs-btn[aria-busy='true'] .rs-icon,
+.rs-btn.is-loading .rs-icon {
+  animation: rs-spin .8s linear infinite;
+}
+
+/* Inputs/selects/textareas share height, focus and disabled behavior. */
+.rs-input { min-height: var(--rs-control-h); }
+.rs-input input,
+.rs-input select { min-height: calc(var(--rs-control-h) - 2px); }
+.rs-textarea { min-height: calc(112px * var(--rs-scale)); resize: vertical; }
+.rs-input:has(input:disabled),
+.rs-input:has(select:disabled),
+.rs-textarea:disabled {
+  opacity: .58;
+  cursor: not-allowed;
+}
+
+.rs-field:has(.rs-field__error) .rs-input,
+.rs-field:has(.rs-field__error) .rs-textarea {
+  border-color: rgba(246, 96, 125, .55);
+}
+
+.rs-field__error[role='alert'],
+.rs-error[role='alert'] { scroll-margin-top: calc(var(--rs-header-h) + 16px); }
+
+/* Chips, segmented controls and list actions remain usable with Large UI. */
+.rs-chip,
+.rs-segmented button,
+.rs-settings-link,
+.rs-hotel-option,
+.rs-issue,
+.rs-photo-action,
+.rs-navbtn,
+.rs-drawer__item,
+.rs-sidebar__item {
+  min-height: 44px;
+}
+
+.rs-segmented button,
+.rs-chip { line-height: 1.2; }
+
+/* Page rhythm: feature styles can change layout, but not random vertical density. */
+.rs-form,
+.rs-pref-block,
+.rs-modal__body,
+.rs-sheet__body { gap: var(--rs-page-gap); }
+
+.rs-form-actions,
+.rs-modal__actions {
+  display: flex;
+  gap: calc(10px * var(--rs-scale));
+  align-items: stretch;
+}
+
+.rs-form-actions > .rs-btn,
+.rs-modal__actions > .rs-btn { min-width: 0; }
+
+/* Full-screen detail surfaces own the viewport on phone, tablet and desktop. */
+.rs-fullpage-layer {
+  overscroll-behavior: contain;
+}
+
+.rs-fullpage {
+  height: var(--rs-app-viewport-height);
+  min-height: var(--rs-app-viewport-min-height);
+}
+
+.rs-fullpage__body {
+  scrollbar-gutter: stable;
+}
+
+@media (pointer: coarse) {
+  button, [role='button'], a, input, select { min-height: 44px; }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  button:not(:disabled), [role='button'], a[href] { cursor: pointer; }
+}
+
+@media (min-width: 900px) {
+  .rs-fullpage__body { padding-top: 28px; padding-bottom: 32px; }
+  .rs-fullpage__footer .rs-btn { width: min(100%, 320px); }
+}
+
+@media (orientation: landscape) and (max-height: 520px) {
+  .rs-fullpage__head {
+    padding-top: max(8px, var(--rs-adaptive-safe-top, 0px));
+    padding-bottom: 8px;
+  }
+  .rs-fullpage__body {
+    padding-top: 12px;
+    padding-bottom: 12px;
+  }
+  .rs-fullpage__footer {
+    padding-top: 6px;
+    padding-bottom: calc(6px + var(--rs-adaptive-safe-bottom, 0px));
+  }
+}
+
+/* Consistent operational feedback. */
+.rs-error,
+.rs-field__error {
+  line-height: 1.4;
+}
+
+.rs-empty,
+.rs-spinner {
+  min-height: calc(150px * var(--rs-scale));
+  justify-content: center;
+}
+
+/* Keep content readable in all three UI sizes without horizontal page overflow. */
+.rs-card,
+.rs-field,
+.rs-input,
+.rs-modal,
+.rs-sheet,
+.rs-form,
+.rs-toolbar { min-width: 0; }
+
+img { max-width: 100%; }
+
+@media (max-width: 520px) {
+  .rs-form-actions,
+  .rs-modal__actions { flex-wrap: wrap; }
+  .rs-form-actions > .rs-btn,
+  .rs-modal__actions > .rs-btn { flex: 1 1 140px; }
+  .rs-overlay--center { padding: 12px max(12px, env(safe-area-inset-right)) 12px max(12px, env(safe-area-inset-left)); }
+}
+
+@media (max-width: 360px) {
+  .rs-form-actions > .rs-btn,
+  .rs-modal__actions > .rs-btn { flex-basis: 100%; }
+}
+
+/* Windows keyboard users + reduced-motion users get first-class behavior. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
+}
+
+@media (prefers-contrast: more) {
+  :root {
+    --rs-line: rgba(100, 190, 240, .34);
+    --rs-line-strong: rgba(100, 210, 245, .68);
+  }
+  html[data-theme='light'] {
+    --rs-line: rgba(28, 72, 126, .34);
+    --rs-line-strong: rgba(10, 92, 156, .64);
+  }
+}
+
+/* Compact fetch honesty banner above operational lists. */
+.rs-list-fetch-notice { margin: 0 0 12px; }
+.rs-list-fetch-notice .rs-randui-state { width: 100%; }
+.rs-list-fetch-notice .rs-randui-state--compact { margin-bottom: 0; }

@@ -1,0 +1,248 @@
+import { useEffect, useMemo, useState } from 'react'
+import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from '@tanstack/react-query'
+import { fetchIssues } from '../issues-data.js'
+import { fetchUrgents } from '../urgents-data.js'
+import { fetchPlanned } from '../planned-data.js'
+import { fetchOperationalWeather } from '../weather-data.js'
+import { buildColleaguePresenceRows, fetchPeopleInStructure } from '../home-presence.js'
+import {
+  buildMyWorkPreview,
+  buildNextCommitment,
+  syncStatusMessage,
+  weatherSummary,
+} from '../home-widgets-logic.js'
+import { drainOfflineQueue, getOfflineStatus } from '../offline-store.js'
+import { withTimeout } from '../async-timeout.js'
+import { fetchReminders } from './reminders/reminder-data.js'
+import { canUser } from '../permissions.js'
+import { firstName, isToday, URGENCY_META } from './helpers.js'
+import { Button, EmptyState, Icon, Spinner } from './ui.jsx'
+import { CommandSurface, StatCard, StatusChip } from './randui/advanced-primitives.jsx'
+import PresenceChip from './PresenceChip.jsx'
+
+const HOME_QUERY_TIMEOUT_MS = 15000
+const timed = (promise, label) => withTimeout(promise, HOME_QUERY_TIMEOUT_MS, label)
+const queryClient = new QueryClient({ defaultOptions: { queries: { staleTime: 30_000, gcTime: 5 * 60_000, retry: 1, refetchOnWindowFocus: false } } })
+const FOCUS_KEY = 'randapp.home.focus.v1'
+const readFocus = () => { try { return localStorage.getItem(FOCUS_KEY) !== 'complete' } catch { return true } }
+const writeFocus = (focus) => { try { localStorage.setItem(FOCUS_KEY, focus ? 'focus' : 'complete') } catch {} }
+const dateKey = (value = new Date()) => value.toISOString().slice(0, 10)
+const weekdayKey = (date) => ['sun','mon','tue','wed','thu','fri','sat'][date.getDay()]
+const monthDay = (date) => date.getDate()
+const timeLabel = (ms) => ms ? new Intl.DateTimeFormat('it-IT', { hour: '2-digit', minute: '2-digit' }).format(new Date(ms)) : ''
+
+export function reminderDueToday(item, user, now = new Date()) {
+  if (!item?.active || !(item.target_roles || []).includes(user?.role)) return false
+  const today = dateKey(now)
+  if (item.start_date && today < item.start_date) return false
+  if (item.end_date && today > item.end_date) return false
+  if (item.repeat_kind === 'once') return item.start_date === today
+  if (item.repeat_kind === 'daily') return true
+  if (item.repeat_kind === 'weekly') return (item.weekdays || []).includes(weekdayKey(now))
+  if (item.repeat_kind === 'monthly') return Number(item.month_day || String(item.start_date || '').slice(8, 10)) === monthDay(now)
+  return false
+}
+
+function roleLabel(user) {
+  const role = user?.role || 'Utente'
+  if (role === 'manutentore') return 'Manutenzione'
+  if (role === 'Governante' || role === 'Capo Governante') return 'Housekeeping'
+  return role
+}
+
+function deskDayLabel(now = new Date()) {
+  return new Intl.DateTimeFormat('it-IT', { weekday: 'short', day: 'numeric', month: 'short' }).format(now)
+}
+
+export function buildPriorityItems({ user, openUrgents, openIssues, todayInterventions, reminders, weather }) {
+  const rows = []
+  if (canUser(user, 'urgent', 'view')) openUrgents.forEach((item) => rows.push({ id:`urgent-${item.id}`,score:100,tone:'high',icon:'warning',route:'urgent',eyebrow:'Allarme',title:item.message||item.title||item.location||'Richiesta urgente',meta:item.location||item.room||'Richiede attenzione immediata' }))
+  if (weather?.level === 'danger' || weather?.level === 'warning') rows.push({ id:'weather',score:weather.level === 'danger' ? 96 : 82,tone:weather.level==='danger'?'high':'mid',icon:'thermometer',eyebrow:weather.level==='danger'?'Allarme meteo':'Attenzione meteo',title:weather.message||'Controllare gli esterni',meta:weather.level==='danger'?'Azione consigliata adesso':'Verifica preventiva' })
+  if (canUser(user, 'issues', 'view')) openIssues.forEach((item) => rows.push({ id:`issue-${item.id}`,score:item.urgency === 'alta' ? 92 : item.urgency === 'media' ? 58 : 42,tone:URGENCY_META[item.urgency]?.tone||'mid',icon:'issues',route:'issues',eyebrow:'Segnalazione',title:item.title||'Segnalazione aperta',meta:item.room||'Da gestire',createdAt:item.createdAt }))
+  if (canUser(user, 'reminders', 'view')) reminders.filter((item) => reminderDueToday(item,user)).forEach((item) => rows.push({ id:`reminder-${item.id}`,score:78,tone:'accent',icon:'bell',route:'reminders',eyebrow:'Promemoria',title:item.message||'Promemoria',meta:(item.times||[]).length?`Oggi · ${(item.times||[]).join(' · ')}`:'Oggi' }))
+  if (canUser(user, 'interventions', 'view')) todayInterventions.forEach((item) => rows.push({ id:`planned-${item.id}`,score:item.scheduledAt&&item.scheduledAt<Date.now()?76:68,tone:'todo',icon:'wrench',route:'interventions',eyebrow:'Intervento oggi',title:item.notes||item.category||'Intervento pianificato',meta:[item.location,timeLabel(item.scheduledAt)].filter(Boolean).join(' · ')||'Pianificato oggi' }))
+  return rows.sort((a, b) => b.score - a.score || (a.createdAt || 0) - (b.createdAt || 0))
+}
+
+function HomeData({ user, hotel, onNavigate, personalizeSignal }) {
+  const queryClient = useQueryClient()
+  const [focusOnly,setFocusOnly]=useState(readFocus)
+  const [preferencesOpen,setPreferencesOpen]=useState(false)
+  const [chartMode,setChartMode]=useState(()=>{try{return localStorage.getItem('randapp-home-chart-mode')||'full'}catch{return 'full'}})
+  const changeChartMode=(value)=>{setChartMode(value);try{localStorage.setItem('randapp-home-chart-mode',value)}catch{}}
+  const [offlineStatus,setOfflineStatus]=useState(null)
+  useEffect(()=>{ if(personalizeSignal>0) setPreferencesOpen(true) },[personalizeSignal])
+  useEffect(()=>{
+    let alive=true
+    getOfflineStatus().then((status)=>{ if(alive) setOfflineStatus(status) }).catch(()=>{})
+    const onStatus=(event)=>{ setOfflineStatus(event.detail||null) }
+    window.addEventListener('apice-offline-status', onStatus)
+    return ()=>{ alive=false; window.removeEventListener('apice-offline-status', onStatus) }
+  },[])
+  const canIssues = canUser(user, 'issues', 'view')
+  const canCreateIssues = canUser(user, 'issues', 'create')
+  const canUrgent = canUser(user, 'urgent', 'view')
+  const canInterventions = canUser(user, 'interventions', 'view')
+  const canReminders = canUser(user, 'reminders', 'view')
+  const canInventory = canUser(user, 'inventory', 'view')
+  const issuesQuery=useQuery({queryKey:['home13',hotel.id,'issues'],queryFn:()=>timed(fetchIssues(hotel.id),'Home issues timeout'),enabled:canIssues})
+  const urgentsQuery=useQuery({queryKey:['home13',hotel.id,'urgents'],queryFn:()=>timed(fetchUrgents(hotel.id),'Home urgents timeout'),enabled:canUrgent})
+  const plannedQuery=useQuery({queryKey:['home13',hotel.id,'planned'],queryFn:()=>timed(fetchPlanned(hotel.id),'Home planned timeout'),enabled:canInterventions})
+  const remindersQuery=useQuery({queryKey:['home13',hotel.id,'reminders',user?.role],queryFn:()=>timed(fetchReminders(hotel.id),'Home reminders timeout'),enabled:canReminders})
+  const weatherQuery=useQuery({queryKey:['home13',hotel.id,'weather'],queryFn:({signal})=>timed(fetchOperationalWeather(hotel.id,{signal}),'Home weather timeout'),refetchInterval:5*60_000})
+  const presenceQuery=useQuery({queryKey:['home13',hotel.id,'presence'],queryFn:()=>timed(fetchPeopleInStructure(hotel.id),'Home presence timeout'),refetchInterval:60_000})
+  useEffect(()=>{
+    const refreshPresence=()=>{ queryClient.invalidateQueries({ queryKey:['home13',hotel.id,'presence'] }) }
+    window.addEventListener('apice-presence-changed', refreshPresence)
+    window.addEventListener('focus', refreshPresence)
+    window.addEventListener('online', refreshPresence)
+    return ()=>{
+      window.removeEventListener('apice-presence-changed', refreshPresence)
+      window.removeEventListener('focus', refreshPresence)
+      window.removeEventListener('online', refreshPresence)
+    }
+  },[queryClient,hotel.id])
+  const coreQueries=[
+    canIssues && issuesQuery,
+    canUrgent && urgentsQuery,
+    canInterventions && plannedQuery,
+    canReminders && remindersQuery,
+  ].filter(Boolean)
+  const loading=coreQueries.some((q)=>q.isLoading)
+  const homeFailed=coreQueries.some((q)=>q.isError)
+  const homeHardFail=homeFailed && !loading && coreQueries.every((q)=>q.isError && !q.data)
+  const retryHome=()=>{
+    queryClient.invalidateQueries({ queryKey:['home13',hotel.id] })
+  }
+  const issues=issuesQuery.data?.issues||[], urgents=urgentsQuery.data?.items||[], planned=plannedQuery.data?.items||[], reminders=remindersQuery.data||[]
+  const openIssues=issues.filter((item)=>item.status!=='done'), openUrgents=urgents.filter((item)=>item.status!=='completata')
+  const todayInterventions=planned.filter((item)=>item.status!=='done'&&(isToday(item.scheduledAt)||(item.scheduledAt&&item.scheduledUntil&&item.scheduledAt<=Date.now()&&item.scheduledUntil>=Date.now())))
+  const weather=weatherQuery.data
+  const weatherCard=weatherSummary(weather)
+  const syncCard=syncStatusMessage(offlineStatus)
+  const presenceRows=useMemo(()=>buildColleaguePresenceRows({
+    people:presenceQuery.data?.people||[],
+    urgents:canUrgent?openUrgents:[],
+  }),[presenceQuery.data?.people,openUrgents,canUrgent])
+  const busyCount=presenceRows.filter((row)=>row.busy).length
+  const presenceOk=presenceQuery.data?.ok!==false
+  const myWorkRows=useMemo(()=>buildMyWorkPreview({
+    user,
+    planned:canInterventions?planned:[],
+    urgents:canUrgent?openUrgents:[],
+  }),[user,planned,openUrgents,canInterventions,canUrgent])
+  const weekBars=useMemo(()=>{
+    const start=new Date(); start.setHours(0,0,0,0)
+    const days=Array.from({length:7},(_,i)=>{const d=new Date(start); d.setDate(d.getDate()-(6-i)); return {key:d.getTime(),label:new Intl.DateTimeFormat('it-IT',{weekday:'short'}).format(d).slice(0,3),count:0}})
+    issues.forEach((item)=>{ if(!item?.createdAt) return; const d=new Date(item.createdAt); d.setHours(0,0,0,0); const day=days.find((x)=>x.key===d.getTime()); if(day) day.count+=1 })
+    return days
+  },[issues])
+  const weekMax=Math.max(1,...weekBars.map((d)=>d.count))
+  const weekTotal=weekBars.reduce((sum,d)=>sum+d.count,0)
+  const nextCommitment=useMemo(()=>buildNextCommitment({
+    user,
+    planned:canInterventions?planned:[],
+    reminders:canReminders?reminders:[],
+    reminderDueToday,
+  }),[user,planned,reminders,canInterventions,canReminders])
+  const priorities=useMemo(()=>buildPriorityItems({user,openUrgents,openIssues,todayInterventions,reminders,weather}),[user,openUrgents,openIssues,todayInterventions,reminders,weather])
+  const visiblePriorities=focusOnly?priorities.filter((item)=>item.score>=68).slice(0,4):priorities.slice(0,8)
+  const dueReminders=reminders.filter((item)=>reminderDueToday(item,user)).length
+  const stats=[canUrgent?{label:'Allarmi',value:openUrgents.length,route:'urgent',tone:openUrgents.length?'danger':'success',icon:'warning',detail:openUrgents.length?'Richiedono attenzione':'Nessun allarme'}:null,canIssues?{label:'Da fare',value:openIssues.length,route:'issues',tone:openIssues.some((x)=>x.urgency==='alta')?'danger':'default',icon:'issues',detail:openIssues.length?'Segnalazioni aperte':'Tutto sotto controllo'}:null,canInterventions?{label:'Oggi',value:todayInterventions.length,route:'interventions',tone:'accent',icon:'wrench',detail:'Interventi previsti'}:null,canReminders?{label:'Promemoria',value:dueReminders,route:'reminders',tone:dueReminders?'warning':'default',icon:'bell',detail:'Da vedere oggi'}:null].filter(Boolean)
+  const tools=[
+    canCreateIssues?['new-issue','plus','Nuova']:null,
+    canInterventions?['my-work','check','Miei']:null,
+    canInterventions?['interventions','wrench','Interventi']:null,
+    canUrgent?['urgent','warning','Avvisi']:null,
+    canUser(user, 'housekeeping', 'view')?['housekeeping','housekeeping','HK']:null,
+    canInventory?['inventory','package','Magazzino']:null,
+    canReminders?['reminders','bell','Memo']:null,
+  ].filter(Boolean).slice(0,5)
+  const setMode=(focus)=>{setFocusOnly(focus);writeFocus(focus)}
+  const openPresenceTarget=()=>{ if(canUrgent) onNavigate?.('urgent') }
+  const retrySync=()=>{ drainOfflineQueue().catch(()=>{}) }
+  const showDesk=canInterventions||canUrgent||canIssues
+  const presencePreview=presenceRows.slice(0,4)
+  const presenceMore=Math.max(0, presenceRows.length - presencePreview.length)
+
+  return <section className="rnx-home" data-testid="home-view">
+    <header className="rnx-homehead">
+      <div className="rnx-homehead__copy">
+        <span className="rnx-eyebrow">{roleLabel(user)} · {deskDayLabel()}</span>
+        <h1>Ciao, {firstName(user?.name)}</h1>
+        <p>{hotel.name} · Scrivania operativa</p>
+      </div>
+      <div className="rnx-mobile-presence" data-testid="mobile-presence">
+        <span className="rnx-mobile-presence__label">Presenza</span>
+        <PresenceChip user={user} hotel={hotel} />
+      </div>
+      <div className="rnx-homehead__actions">
+        <Button variant="ghost" size="sm" icon="sliders" className="rnx-homehead__view" onClick={()=>setPreferencesOpen((v)=>!v)} aria-expanded={preferencesOpen} aria-label="Configura vista Home">Vista</Button>
+      </div>
+    </header>
+    {preferencesOpen&&<section className="rnx-panel rnx-homeprefs"><div><strong>Vista Home</strong><small>La priorità resta automatica; scegli quanta informazione mostrare.</small></div><div className="rs-segmented" role="group" aria-label="Vista Home"><button type="button" className={focusOnly?'active':''} onClick={()=>setMode(true)}>Focus</button><button type="button" className={!focusOnly?'active':''} onClick={()=>setMode(false)}>Completa</button></div><div className="rnx-chart-preferences" role="group" aria-label="Visualizzazione grafico">{[["full","Completo"],["compact","Compatto"],["hidden","Nascosto"]].map(([mode,label])=><button key={mode} type="button" aria-pressed={chartMode===mode} onClick={()=>changeChartMode(mode)}>{label}</button>)}</div></section>}
+
+    {loading?<Spinner label="Preparo la scrivania…"/>:homeHardFail?(
+      <div className="rnx-homefail" data-testid="home-hard-fail">
+        <EmptyState icon="warning" title="Scrivania non disponibile">Non riesco a caricare i dati operativi. Controlla la connessione e riprova.</EmptyState>
+        <Button type="button" variant="primary" size="sm" onClick={retryHome} data-testid="home-retry">Riprova</Button>
+      </div>
+    ):<>
+      {homeFailed&&<button type="button" className="rnx-alertline warning" onClick={retryHome} data-testid="home-partial-retry"><Icon name="warning"/><span><strong>Alcuni dati non sono aggiornati</strong><small>Tocca per riprovare</small></span></button>}
+
+      <section className="rnx-kpi-grid" data-count={stats.length} data-testid="home-stats">
+        {stats.map((stat)=><StatCard key={stat.label} label={stat.label} value={stat.value} detail={stat.detail} icon={stat.icon} tone={stat.tone} onClick={()=>onNavigate?.(stat.route)} />)}
+      </section>
+
+      {canIssues&&<div className="rnx-chart-mode-row"><label htmlFor="rand-home-chart-mode">Grafico 7 giorni</label><select id="rand-home-chart-mode" value={chartMode} onChange={(event)=>changeChartMode(event.target.value)} aria-label="Visualizzazione grafico Home"><option value="full">Completo</option><option value="compact">Compatto</option><option value="hidden">Nascosto</option></select></div>}
+
+      {canIssues&&chartMode!=='hidden'&&<section className={`rnx-chartcard ${chartMode==='compact'?'rnx-chartcard--compact':''}`} data-testid="home-week-chart" aria-label="Segnalazioni create negli ultimi 7 giorni">
+        <div className="rnx-chartcard__plot" role="img" aria-label={`Segnalazioni create per giorno: ${weekBars.map((d)=>`${d.label} ${d.count}`).join(', ')}`}>
+          {weekBars.map((d)=><span key={d.key} className="rnx-chartcard__bar"><b>{d.count||''}</b><i style={{height:`${Math.max(6,Math.round((d.count/weekMax)*100))}%`}}/><small>{d.label}</small></span>)}
+        </div>
+        <div className="rnx-chartcard__body"><h2>Segnalazioni ultimi 7 giorni</h2><p>{weekTotal} nuove · {openIssues.length} ancora aperte</p></div>
+      </section>}
+
+      {syncCard&&<button type="button" className={`rnx-alertline ${syncCard.tone}`} onClick={retrySync} data-testid="home-sync"><Icon name="refresh"/><span><strong>{syncCard.title}</strong><small>{syncCard.detail}</small></span></button>}
+
+      {showDesk&&<section className="rnx-desk" data-testid="home-desk">
+        <div className="rnx-desk__head">
+          <div><span className="rnx-eyebrow">Sul banco</span><h2>La tua giornata</h2></div>
+          {weatherCard&&<StatusChip tone={weatherCard.level==='ok'?'success':weatherCard.level==='danger'?'danger':'warning'} icon={weatherCard.level==='ok'?'thermometer':'warning'} data-testid="weather-widget" role="status">{weatherCard.detail}</StatusChip>}
+        </div>
+
+        <button type="button" className={`rnx-next ${nextCommitment?'':'is-empty'}`} data-testid={nextCommitment?'home-next-commitment':'home-next-empty'} onClick={()=>nextCommitment&&onNavigate?.(nextCommitment.route)} disabled={!nextCommitment}>
+          <span className="rnx-next__label">Prossimo</span>
+          <span className="rnx-next__body">{nextCommitment?<><strong>{nextCommitment.title}</strong><small>{nextCommitment.meta}</small></>:<><strong>Nessun impegno orario</strong><small>Quando arriva un intervento o un memo, compare qui</small></>}</span>
+          {nextCommitment&&<Icon name="chevronRight"/>}
+        </button>
+
+        <div className="rnx-deskgrid">
+          <section className="rnx-panel" data-testid="home-my-work" aria-label="I tuoi lavori">
+            <div className="rnx-panel__head"><div><span>Lavori</span><h2>I tuoi</h2></div><small>{myWorkRows.length?`${myWorkRows.length} attivi`:'libero'}</small></div>
+            {!myWorkRows.length?<p className="rnx-empty">{canIssues&&openIssues.length?`${openIssues.length} segnalazion${openIssues.length===1?'e':'i'} in struttura`:'Niente assegnato a te'}</p>:(
+              <div className="rnx-list">{myWorkRows.map((row)=><button key={row.id} type="button" className="rnx-row" onClick={()=>onNavigate?.(row.route)}><span className="rnx-row__icon"><Icon name={row.kind==='urgent'?'warning':'wrench'}/></span><span className="rnx-row__body"><strong>{row.title}</strong><small>{row.meta}</small></span><Icon name="chevronRight"/></button>)}</div>
+            )}
+            <div className="rnx-panel-actions">{canInterventions&&<button type="button" onClick={()=>onNavigate?.('my-work')}>Task</button>}{canIssues&&!myWorkRows.length&&openIssues.length>0&&<button type="button" onClick={()=>onNavigate?.('issues')}>Segnalazioni</button>}</div>
+          </section>
+
+          <section className="rnx-panel" data-testid="home-presence" aria-label="Chi c'è in struttura">
+            <div className="rnx-panel__head"><div><span>Presenza</span><h2>Team</h2></div><small>{presenceQuery.isLoading?'…':`${presenceRows.length} · ${busyCount} impegnati`}</small></div>
+            {presenceQuery.isLoading?<p className="rnx-empty">Controllo presenza…</p>:!presenceOk&&!presenceRows.length?<p className="rnx-empty">Presenza non aggiornata{presenceQuery.data?.offline?' (offline)':''}</p>:!presenceRows.length?<p className="rnx-empty">Nessuno in struttura</p>:(
+              <div className="rnx-teamgrid">{presencePreview.map((row)=><button key={row.id} type="button" className={`rnx-person ${row.busy?'is-busy':''}`} onClick={openPresenceTarget} disabled={!canUrgent} aria-label={`${row.name}: ${row.busy?'impegnato':'libero'}`}><span className="rnx-person__dot"/><span><strong>{row.name.split(' ')[0]}</strong><small>{row.busy?'Impegnato':'Libero'}</small></span></button>)}{presenceMore>0&&<span className="rnx-team-more">+{presenceMore}</span>}</div>
+            )}
+          </section>
+        </div>
+      </section>}
+
+      {!!tools.length&&<section className="rnx-tools" data-testid="home-shortcuts"><CommandSurface title="Azioni rapide" items={tools.map(([route,icon,label])=>({id:route,icon,label,detail:route==='new-issue'?'Apri una nuova segnalazione':route==='my-work'?'Vai ai tuoi task':route==='interventions'?'Apri gli interventi':route==='urgent'?'Controlla gli urgenti':route==='housekeeping'?'Apri housekeeping':route==='inventory'?'Apri magazzino':'Apri promemoria'}))} onPick={(item)=>onNavigate?.(item.id)} /></section>}
+
+      <section className="rnx-tray">
+        <div className="rnx-desk__head"><div><span className="rnx-eyebrow">Priorità</span><h2>Da smaltire</h2></div><small>{visiblePriorities.length} in coda</small></div>
+        {visiblePriorities.length===0?<EmptyState icon="check" title="Vassoio vuoto">Niente urgente da smaltire adesso.</EmptyState>:<div className="rnx-priority-list" data-testid="home-priority-queue">{visiblePriorities.map((item,index)=><button key={item.id} type="button" className={`rnx-priority tone-${item.tone}`} onClick={()=>item.route&&onNavigate?.(item.route)} disabled={!item.route}><span className="rnx-priority__rank">{index+1}</span><span className="rnx-priority__icon"><Icon name={item.icon}/></span><span className="rnx-priority__body"><small>{item.eyebrow}</small><strong>{item.title}</strong><span>{item.meta}</span></span>{item.route&&<Icon name="chevronRight"/>}</button>)}</div>}
+      </section>
+    </>}
+  </section>
+}
+
+export default function Home(props){return <QueryClientProvider client={queryClient}><HomeData {...props}/></QueryClientProvider>}

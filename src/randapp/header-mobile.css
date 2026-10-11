@@ -1,0 +1,266 @@
+/* Operational header: one real toolbar for structure, presence, notifications and profile/menu. */
+.rs-header--operational {
+  display: flex;
+  align-items: center;
+}
+
+.rs-header__actions {
+  margin-left: auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: calc(8px * var(--rs-scale));
+}
+
+.rs-hotelchip__name-mobile { display: none; }
+.rs-hotelchip__name-desktop { display: inline; }
+
+@media (max-width: 899px) {
+  .rs-header {
+    --rs-header-action-size: clamp(40px, calc(42px * var(--rs-scale)), 50px);
+    gap: calc(4px * var(--rs-scale));
+  }
+
+  /* Structure stays on the left and uses the real hotel name without changing typography. */
+  .rs-header--operational .rs-hotelchip--operational {
+    min-width: 0;
+    flex: 0 1 auto;
+    width: max-content;
+    min-height: var(--rs-header-action-size);
+    max-width: none;
+    padding: calc(4px * var(--rs-scale)) calc(6px * var(--rs-scale));
+    gap: calc(6px * var(--rs-scale));
+    border-color: transparent;
+    border-radius: calc(13px * var(--rs-scale));
+    background: transparent;
+    box-shadow: none;
+  }
+
+  .rs-header--operational .rs-hotelchip--operational:active {
+    background: color-mix(in srgb, var(--rs-surface-2) 82%, transparent);
+  }
+
+  .rs-header--operational .rs-hotelchip--operational img {
+    width: calc(32px * var(--rs-scale));
+    height: calc(32px * var(--rs-scale));
+    border-radius: 50%;
+    object-fit: contain;
+  }
+
+  /* The full canonical hotel name is already in the desktop span: reuse it on mobile. */
+  .rs-hotelchip__name-mobile { display: none; }
+  .rs-hotelchip__name-desktop {
+    display: inline;
+    font-size: .82rem;
+    white-space: nowrap;
+  }
+
+  .rs-header--operational .rs-hotelchip__text {
+    min-width: max-content;
+    overflow: visible;
+    text-overflow: clip;
+    white-space: nowrap;
+  }
+
+  .rs-hotelchip__caret .rs-icon {
+    width: calc(14px * var(--rs-scale));
+    height: calc(14px * var(--rs-scale));
+  }
+
+  .rs-header__actions {
+    flex: none;
+    gap: calc(3px * var(--rs-scale));
+  }
+
+  /* Stable right-side order requested on device: presence -> bell -> profile/menu. */
+  .rs-header [data-testid='presence-chip'] { order: 1; }
+  .rs-header .rs-header-notify { order: 2; }
+  .rs-header .rs-profile-trigger { order: 3; }
+  .rs-header [data-testid='header-notifications'] {
+    width: var(--rs-header-action-size);
+    min-width: var(--rs-header-action-size);
+    height: var(--rs-header-action-size);
+    min-height: var(--rs-header-action-size);
+    border-radius: calc(13px * var(--rs-scale));
+  }
+
+  /* Presence remains a real toggle, but the redundant GIO/CHO/BRI text disappears on mobile. */
+  .rs-header [data-testid='presence-chip'] {
+    width: var(--rs-header-action-size);
+    min-width: var(--rs-header-action-size);
+    max-width: var(--rs-header-action-size);
+    min-height: var(--rs-header-action-size) !important;
+    height: var(--rs-header-action-size);
+    padding: 0 !important;
+    gap: 0 !important;
+    display: grid !important;
+    place-items: center;
+    border-radius: 50% !important;
+    border-color: transparent !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    align-self: center;
+  }
+
+  .rs-header [data-testid='presence-chip'] > span:first-child {
+    width: clamp(11px, calc(12px * var(--rs-scale)), 14px) !important;
+    height: clamp(11px, calc(12px * var(--rs-scale)), 14px) !important;
+    margin: 0 !important;
+    border: 2px solid var(--rs-surface) !important;
+    box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 16%, transparent), 0 2px 8px color-mix(in srgb, currentColor 20%, transparent);
+  }
+
+  .rs-header [data-testid='presence-chip'] > span:last-child {
+    position: absolute !important;
+    width: 1px !important;
+    height: 1px !important;
+    padding: 0 !important;
+    margin: -1px !important;
+    overflow: hidden !important;
+    clip: rect(0 0 0 0) !important;
+    white-space: nowrap !important;
+    border: 0 !important;
+  }
+
+  /* Profile is the menu trigger and intentionally remains the last control on the right. */
+  .rs-header .rs-profile-trigger {
+    position: relative;
+    width: var(--rs-header-action-size);
+    min-width: var(--rs-header-action-size);
+    height: var(--rs-header-action-size);
+    min-height: var(--rs-header-action-size);
+    padding: 0;
+    justify-content: center;
+    border: 0;
+    border-radius: 50%;
+    background: transparent;
+    box-shadow: none;
+  }
+
+  .rs-header .rs-profile-trigger::after {
+    content: '≡';
+    position: absolute;
+    right: -1px;
+    bottom: 0;
+    width: 16px;
+    height: 16px;
+    display: grid;
+    place-items: center;
+    border: 2px solid var(--rs-surface);
+    border-radius: 50%;
+    background: var(--rs-surface-2);
+    color: var(--rs-text-2);
+    font: 800 11px/1 system-ui, sans-serif;
+    letter-spacing: -.08em;
+    box-sizing: border-box;
+  }
+
+  .rs-header [data-testid='header-notifications'] .rs-icon {
+    width: calc(21px * var(--rs-scale));
+    height: calc(21px * var(--rs-scale));
+  }
+
+  .rs-header .rs-header-notify {
+    flex: none;
+    margin-left: 1px;
+  }
+}
+
+@media (max-width: 430px) {
+  .rs-header {
+    --rs-header-action-size: clamp(38px, calc(40px * var(--rs-scale)), 46px);
+    gap: calc(3px * var(--rs-scale));
+  }
+
+  .rs-header--operational .rs-hotelchip--operational {
+    max-width: none;
+    padding-inline: calc(5px * var(--rs-scale));
+  }
+
+  .rs-header--operational .rs-hotelchip--operational img {
+    width: calc(30px * var(--rs-scale));
+    height: calc(30px * var(--rs-scale));
+  }
+
+  .rs-hotelchip__name-desktop { font-size: .76rem; }
+  .rs-header__actions { gap: calc(2px * var(--rs-scale)); }
+  .rs-header [data-testid='header-notifications'] {
+    border-radius: calc(12px * var(--rs-scale));
+  }
+
+  .rs-header .rs-profile-trigger::after {
+    width: 15px;
+    height: 15px;
+    font-size: 10px;
+  }
+}
+
+.rs-notification-center {
+  display: grid;
+  gap: 12px;
+}
+
+.rs-notification-center__intro {
+  margin: 0;
+  color: var(--rs-text-2);
+  font-size: .88rem;
+  line-height: 1.45;
+}
+
+.rs-notification-center__item {
+  width: 100%;
+  min-height: 64px;
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) 22px;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 12px;
+  border: 1px solid var(--rs-line);
+  border-radius: 15px;
+  background: var(--rs-surface);
+  color: var(--rs-text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.rs-notification-center__item > span:first-child {
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  border-radius: 13px;
+  background: var(--rs-surface-2);
+  color: var(--rs-cyan);
+}
+
+.rs-notification-center__item strong,
+.rs-notification-center__item small { display: block; }
+
+.rs-notification-center__item small {
+  margin-top: 2px;
+  color: var(--rs-text-3);
+  line-height: 1.35;
+}
+
+.rs-notification-center__reserved {
+  padding: 12px;
+  border: 1px dashed var(--rs-line);
+  border-radius: 15px;
+  color: var(--rs-text-2);
+  background: color-mix(in srgb, var(--rs-surface-2) 70%, transparent);
+}
+
+.rs-notification-center__reserved strong { color: var(--rs-text); }
+
+/* Phone Material chrome: short hotel labels (Giò / Choco / …) to free topbar space. */
+@media (max-width: 767px) {
+  .rnx-hotelchip .rs-hotelchip__name-mobile,
+  .rs-hotelchip__name-mobile {
+    display: inline !important;
+  }
+  .rnx-hotelchip .rs-hotelchip__name-desktop,
+  .rs-hotelchip__name-desktop {
+    display: none !important;
+  }
+}

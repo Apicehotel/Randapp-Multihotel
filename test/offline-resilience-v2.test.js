@@ -1,0 +1,137 @@
+import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
+import test from 'node:test'
+
+const read = (path) => readFile(new URL(path, import.meta.url), 'utf8')
+
+test('offline store compacts repeated mutations, preserves conflict bases and cleans staged blobs', async () => {
+  const src = await read('../src/offline-store.js')
+  assert.match(src, /db\.version\(4\)/)
+  assert.match(src, /&operationId/)
+  assert.match(src, /failures:/)
+  assert.match(src, /async function compactMutation/)
+  assert.match(src, /mergeQueuedPayload/)
+  assert.match(src, /_syncBaseValues = \{ \.\.\.\(nextBase \|\| \{\}\), \.\.\.\(previousBase \|\| \{\}\) \}/)
+  assert.match(src, /_syncBaseVersion/)
+  assert.match(src, /cleanupPayloadBlobs/)
+  assert.match(src, /OFFLINE_BLOB_PREFIX/)
+  assert.match(src, /retryDelay/)
+  assert.match(src, /nextAttemptAt/)
+  assert.match(src, /leaseOwner/)
+  assert.match(src, /leaseUntil/)
+  assert.match(src, /OFFLINE_CONFLICT/)
+  assert.match(src, /retryOfflineFailure\(id, \{ force = false \} = \{\}\)/)
+  assert.match(src, /discardOfflineFailure/)
+})
+
+test('editable offline entities use mutation ids and server versions', async () => {
+  const [issues, planned, urgents, sale] = await Promise.all([
+    read('../src/issues-data.js'),
+    read('../src/planned-data.js'),
+    read('../src/urgents-data.js'),
+    read('../src/sale-data.js'),
+  ])
+  for (const src of [issues, planned, urgents, sale]) {
+    assert.match(src, /clientMutationId/)
+    assert.match(src, /mutation_id/)
+    assert.match(src, /updated_at/)
+    assert.match(src, /_syncBaseUpdatedAt/)
+    assert.match(src, /_syncBaseValues/)
+    assert.match(src, /conflictError/)
+    assert.match(src, /23505/)
+  }
+  assert.match(issues, /updatedAtToken/)
+  assert.match(issues, /_syncBaseVersion/)
+})
+
+test('queued deletes cannot silently remove records changed by another device', async () => {
+  const [issues, planned, sale] = await Promise.all([read('../src/issues-data.js'), read('../src/planned-data.js'), read('../src/sale-data.js')])
+  for (const src of [issues, planned, sale]) assert.match(src, /async function deleteBase/)
+  assert.match(issues, /soft_delete_issue_cas/)
+  assert.match(issues, /p_expected_updated_at:expected/)
+  assert.match(issues, /operationId=makeOfflineOperationId\(\)/)
+  for (const src of [planned, sale]) {
+    assert.match(src, /payload:await deleteBase/)
+    assert.match(src, /select\('updated_at'\)/)
+    assert.match(src, /conflictError\(\['eliminazione'\]\)/)
+  }
+})
+
+test('photo-backed entities compare storage paths and pre-check mutation ids before retry upload', async () => {
+  const [issues, planned] = await Promise.all([read('../src/issues-data.js'), read('../src/planned-data.js')])
+  assert.match(issues, /key==='photoData'\?item\?\.photoPath/)
+  assert.match(issues, /completionPhotoData.*completionPhotoPath/)
+  assert.match(issues, /existingByMutation/)
+  assert.match(issues, /const existing=await existingByMutation\(mutationId\)/)
+  assert.match(planned, /key==='photoAfter'\?item\?\.photoAfterPath/)
+  assert.match(planned, /existingByMutation/)
+  assert.match(planned, /const existing=await existingByMutation\(mutationId\)/)
+})
+
+test('urgent dispatch is atomic, auditable and explicit when queued offline', async () => {
+  const urgents = await read('../src/urgents-data.js')
+  assert.match(urgents, /prendi_urgente/)
+  assert.match(urgents, /completa_urgente/)
+  assert.match(urgents, /fetchUrgentEvents/)
+  assert.match(urgents, /severity/)
+  assert.match(urgents, /location/)
+  assert.match(urgents, /non ancora trasmesso/)
+  assert.match(urgents, /urgent_id/)
+})
+
+test('queued urgent created offline sends its notification after reconnect', async () => {
+  const urgents = await read('../src/urgents-data.js')
+  assert.match(urgents, /_notifyOnSync:true/)
+  assert.match(urgents, /if\(item\._notifyOnSync\)await notifyUrgent/)
+})
+
+test('urgent push validates the urgent record and deduplicates by urgent id', async () => {
+  const push = await read('../supabase/functions/send-push/index.ts')
+  assert.match(push, /urgent_id/)
+  assert.match(push, /urgent_not_found/)
+  assert.match(push, /gravita,posizione,stato/)
+  assert.match(push, /EMERGENZA/)
+  assert.match(push, /avviso-urgente-\$\{urgentId \|\| hotel\}/)
+})
+
+test('create-only feedback is idempotent too', async () => {
+  const feedback = await read('../src/feedback-data.js')
+  assert.match(feedback, /clientMutationId/)
+  assert.match(feedback, /mutation_id/)
+  assert.match(feedback, /23505/)
+})
+
+test('core lists refresh after local queue replay or conflict resolution', async () => {
+  const files = await Promise.all([
+    read('../src/issues-data.js'),
+    read('../src/planned-data.js'),
+    read('../src/urgents-data.js'),
+    read('../src/sale-data.js'),
+    read('../src/feedback-data.js'),
+  ])
+  for (const src of files) assert.match(src, /apice-offline-data-changed/)
+})
+
+test('housekeeping v2 keeps offline data isolated per hotel and separates day/work mutations', async () => {
+  const housekeeping = await read('../src/housekeeping-v2.jsx')
+  assert.match(housekeeping, /randappHousekeepingV2-\$\{hotelId\}/)
+  assert.match(housekeeping, /outbox:'&key,camera,kind'/)
+  assert.match(housekeeping, /key:`work:\$\{camera\}`/)
+  assert.match(housekeeping, /key:`day:\$\{camera\}`/)
+  assert.match(housekeeping, /baseValues/)
+  assert.match(housekeeping, /OFFLINE_CONFLICT/)
+  assert.match(housekeeping, /failures/)
+  assert.match(housekeeping, /setInterval\(retry,15000\)/)
+})
+
+test('offline status provides a cross-device conflict resolution panel', async () => {
+  const status = await read('../src/offline-status.js')
+  const css = await read('../src/offline-status.css')
+  assert.match(status, /getOfflineFailures/)
+  assert.match(status, /Mantieni versione server/)
+  assert.match(status, /Usa la mia modifica/)
+  assert.match(status, /force: true/)
+  assert.match(css, /apice-sync-panel/)
+  assert.match(css, /@media \(min-width: 800px\)/)
+  assert.match(css, /@media \(max-width: 420px\)/)
+})

@@ -1,0 +1,219 @@
+/* New issue: compact description + one real photo control.
+   Inspired by accessible single-file dropzone patterns: one target, preview in-place,
+   no duplicated visual controls. Existing native input stays the source of truth. */
+[data-testid='new-issue-form'] {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) 104px;
+  column-gap: 10px !important;
+  row-gap: var(--issue-gap, 14px) !important;
+  align-items: start;
+}
+
+[data-testid='new-issue-form'] > * {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+
+[data-testid='new-issue-form'] > .rs-field:has([data-testid='issue-title-input']) {
+  grid-column: 1;
+  margin: 0 !important;
+}
+
+[data-testid='new-issue-form'] > .rs-fieldset:has(.rs-photo-actions) {
+  grid-column: 2;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  align-self: start;
+  min-width: 0;
+  position: relative;
+}
+
+/* legend stays screen-reader-only: fully out of flow, never affects layout */
+[data-testid='new-issue-form'] > .rs-fieldset:has(.rs-photo-actions) legend {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+}
+
+/* Real spacer (not the legend) matching the height of the description label,
+   so the photo tile lines up with the textarea regardless of legend rendering quirks. */
+[data-testid='new-issue-form'] > .rs-fieldset:has(.rs-photo-actions)::before {
+  content: '';
+  display: block;
+  height: 20px;
+  width: 1px;
+}
+
+/* One visual target. Camera remains the primary mobile action.
+   The gallery input overlays the same tile, so there is never a second box or label. */
+[data-testid='new-issue-form'] .rs-photo-actions {
+  position: relative;
+  display: block !important;
+  width: 100% !important;
+  height: 118px !important;
+  min-height: 118px !important;
+  border: 1px solid var(--rs-line) !important;
+  border-radius: 17px !important;
+  overflow: hidden;
+  background: var(--rs-surface) !important;
+  transition: border-color .2s, box-shadow .2s;
+}
+
+[data-testid='new-issue-form'] .rs-photo-actions:focus-within,
+[data-testid='new-issue-form'] .rs-photo-actions:has(.rs-photo-action:active) {
+  border-color: var(--rs-line-strong) !important;
+  box-shadow: 0 0 0 3px rgba(34, 211, 238, .14);
+}
+
+[data-testid='new-issue-form'] .rs-photo-action {
+  position: absolute !important;
+  inset: 0 !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  min-width: 0;
+  min-height: 0 !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  padding: 8px !important;
+  flex-direction: column !important;
+  gap: 4px !important;
+  cursor: pointer;
+  opacity: 1 !important;
+  pointer-events: auto !important;
+  z-index: 2 !important;
+  appearance: none;
+  -webkit-appearance: none;
+  font: inherit;
+  color: inherit;
+  outline: none;
+}
+
+[data-testid='new-issue-form'] .rs-photo-action .rs-icon {
+  width: 25px !important;
+  height: 25px !important;
+  color: var(--rs-text-2);
+}
+
+[data-testid='new-issue-form'] .rs-photo-action strong {
+  font-size: 0 !important;
+  line-height: 1;
+}
+
+[data-testid='new-issue-form'] .rs-photo-action strong::after {
+  content: 'Foto';
+  font-size: .76rem;
+  font-weight: 750;
+  color: var(--rs-muted);
+}
+
+[data-testid='new-issue-form'] .rs-photo-preview {
+  position: absolute !important;
+  inset: 0 !important;
+  z-index: 3;
+  width: 100% !important;
+  height: 100% !important;
+  max-height: none !important;
+  margin: 0 !important;
+  object-fit: cover;
+  border-radius: 17px !important;
+  pointer-events: none;
+}
+
+[data-testid='new-issue-form'] .rs-photo-preview-wrap {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+}
+
+/* Anteprima a piena larghezza sotto Descrizione+Foto, non più schiacciata nel riquadro stretto. */
+[data-testid='new-issue-form'] > .rs-photo-preview-wrap--full {
+  grid-column: 1 / -1;
+  position: relative;
+  inset: auto;
+  z-index: auto;
+  pointer-events: auto;
+  margin-top: 2px;
+}
+
+[data-testid='new-issue-form'] > .rs-photo-preview-wrap--full .rs-photo-preview {
+  position: static !important;
+  inset: auto !important;
+  width: 100% !important;
+  height: auto !important;
+  max-height: 260px !important;
+  display: block;
+  object-fit: cover;
+  border-radius: 14px !important;
+}
+
+[data-testid='new-issue-form'] .rs-photo-remove {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 4;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 0;
+  background: rgba(0, 0, 0, .65);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 0;
+  pointer-events: auto;
+}
+
+[data-testid='new-issue-form'] .rs-photo-remove .rs-icon {
+  width: 14px;
+  height: 14px;
+  color: #fff;
+}
+
+[data-testid='new-issue-form'] > .rs-field:has([data-testid='issue-title-input']) .rs-textarea {
+  min-height: 118px !important;
+  height: 118px !important;
+  resize: vertical;
+}
+
+[data-testid='new-issue-form'] > .rs-form-actions {
+  grid-column: 1 / -1;
+  margin-top: 0 !important;
+}
+
+/* Very narrow phones: preserve usable text width instead of squeezing it. */
+@media (max-width: 374px) {
+  [data-testid='new-issue-form'] {
+    grid-template-columns: minmax(0, 1fr) 86px;
+    column-gap: 8px !important;
+  }
+  [data-testid='new-issue-form'] .rs-photo-actions,
+  [data-testid='new-issue-form'] > .rs-field:has([data-testid='issue-title-input']) .rs-textarea {
+    height: 108px !important;
+    min-height: 108px !important;
+  }
+}
+
+/* Tablet / desktop: still one compact uploader, never a tall sidebar. */
+@media (min-width: 700px) {
+  [data-testid='new-issue-form'] {
+    grid-template-columns: minmax(0, 1fr) 132px;
+    column-gap: 14px !important;
+  }
+  [data-testid='new-issue-form'] .rs-photo-actions,
+  [data-testid='new-issue-form'] > .rs-field:has([data-testid='issue-title-input']) .rs-textarea {
+    height: 126px !important;
+    min-height: 126px !important;
+  }
+}

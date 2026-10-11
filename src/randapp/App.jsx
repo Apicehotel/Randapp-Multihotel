@@ -1,0 +1,484 @@
+import { Suspense, useEffect, useMemo, useRef, useState } from 'react'
+import { HOTELS } from '../config.js'
+import { loadSession, saveSession, clearSession } from '../session.js'
+import { isOfflineSessionFresh, markSessionValidated } from '../session-policy.js'
+import { withTimeout } from '../async-timeout.js'
+import { lazyWithRetry } from '../lazy-retry.js'
+import { Button, Field, TextInput, Icon, Spinner, ThemeSwitch } from './ui.jsx'
+import { normalize, logoFor, hotelById, firstName } from './helpers.js'
+import { resolveLoginUser } from './login-resolve.js'
+import PinRecoveryComplete, { PinRecoveryRequest } from './PinRecovery.jsx'
+
+const Shell = lazyWithRetry(() => import('./Shell.jsx'))
+const Settings = lazyWithRetry(() => import('./Settings.jsx'))
+const SESSION_CHECK_TIMEOUT_MS = 12000
+
+const EVENT = 'apice-session-changed'
+
+const LOGIN_DIRECTORY_MIN_QUERY = 2
+const LOGIN_DIRECTORY_DEBOUNCE_MS = 220
+
+async function searchLoginDirectory(query) {
+  const q = String(query || '').trim()
+  if (q.length < LOGIN_DIRECTORY_MIN_QUERY) return []
+  const { fetchLoginDirectory } = await import('../users-data.js')
+  const rows = await Promise.all(HOTELS.map(async (hotel) => {
+    try {
+      const result = await fetchLoginDirectory(hotel.id, q)
+      return { hotelId: hotel.id, users: result?.users || [] }
+    } catch { return { hotelId: hotel.id, users: [] } }
+  }))
+  const map = new Map()
+  rows.forEach(({ hotelId, users }) => users.forEach((u) => {
+    const key = u.legacy_id || u.id || normalize(u.name)
+    if (!key) return
+    const current = map.get(key) || { ...u, hotels: [] }
+    current.hotels = Array.from(new Set([...(current.hotels || []), hotelId]))
+    map.set(key, current)
+  }))
+  return Array.from(map.values()).sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'it'))
+}
+
+function BrandMark({ tagline = true }) {
+  return (
+    <div className="rs-brand">
+      <div className="rs-brand__logo"><img src="/logos/apicehotel-mascot.png" alt="ApiceHotel" /></div>
+      <div>
+        <h1 className="rs-brand__title">RandApp</h1>
+        <p className="rs-brand__sub">Manutenzione</p>
+        {tagline && <p className="rs-brand__tag"><Icon name="sparkles" /> Gestione e manutenzione delle strutture</p>}
+      </div>
+    </div>
+  )
+}
+
+function AdminGate({ onBack, onExit }) {
+  const [pin, setPin] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [ok, setOk] = useState(false)
+  const submit = async (e) => {
+    e.preventDefault(); setError(''); setBusy(true)
+    try { const { loginAdmin } = await import('../auth-data.js'); await loginAdmin(pin); setOk(true) }
+    catch { setError('PIN amministratore non valido') }
+    finally { setBusy(false) }
+  }
+  const goBack = () => {
+    const active = document.activeElement
+    if (active instanceof HTMLElement) active.blur()
+    onBack?.()
+  }
+  if (ok) return <Suspense fallback={<Spinner label="Carico impostazioni…" />}><Settings onExit={onExit || onBack} /></Suspense>
+  return (
+    <main className="rs-auth rs-auth--admin">
+      <ThemeSwitch className="rs-themeswitch--corner" />
+      <div className="rs-auth__inner">
+        <BrandMark tagline={false} />
+        <section className="rs-card rs-authcard">
+          <button type="button" className="rs-textback" data-testid="admin-back" onClick={goBack}><Icon name="chevronLeft" /> RandApp</button>
+          <header><h1>Impostazioni</h1><p>Accesso protetto amministratore</p></header>
+          <form className="rs-authform" onSubmit={submit}>
+            <Field label="PIN amministratore">
+              <TextInput icon="lock" value={pin} inputMode="numeric" autoComplete="current-password" placeholder="••••••" data-testid="admin-pin-input"
+                onChange={(e) => setPin(e.target.value.replace(/\D/g, '').slice(0, 6))} />
+            </Field>
+            {error && <p className="rs-error" role="alert">{error}</p>}
+            <Button type="submit" variant="primary" size="lg" className="rs-btn--block" disabled={busy || pin.length < 6} aria-busy={busy || undefined} data-testid="admin-gate-submit" iconRight="arrowRight">
+              {busy ? 'ACCESSO…' : 'ENTRA'}
+            </Button>
+          </form>
+        </section>
+      </div>
+    </main>
+  )
+}
+
+function Login({ onAuthenticated, onOpenSettings }) {
+  const [directory, setDirectory] = useState([])
+  const [directoryReady, setDirectoryReady] = useState(true)
+  const [directoryFailed, setDirectoryFailed] = useState(false)
+  const [query, setQuery] = useState('')
+  const [matched, setMatched] = useState(null)
+  const [pin, setPin] = useState('')
+  const [busy, setBusy] = useState(false)
+  const busyRef = useRef(false)
+  const searchSeq = useRef(0)
+  const [error, setError] = useState('')
+  const [open, setOpen] = useState(false)
+  const [recovering, setRecovering] = useState(false)
+  useEffect(() => {
+    const q = String(query || '').trim()
+    if (matched || q.length < LOGIN_DIRECTORY_MIN_QUERY) {
+      if (!matched && q.length < LOGIN_DIRECTORY_MIN_QUERY) {
+        setDirectory([])
+        setDirectoryFailed(false)
+        setDirectoryReady(true)
+      }
+      return undefined
+    }
+    let active = true
+    const seq = ++searchSeq.current
+    setDirectoryReady(false)
+    const timer = setTimeout(() => {
+      withTimeout(searchLoginDirectory(q), SESSION_CHECK_TIMEOUT_MS, 'Elenco utenti timeout')
+        .then((rows) => {
+          if (!active || seq !== searchSeq.current) return
+          setDirectory(rows)
+          setDirectoryFailed(!rows.length)
+          setDirectoryReady(true)
+        })
+        .catch(() => {
+          if (!active || seq !== searchSeq.current) return
+          setDirectory([])
+          setDirectoryFailed(true)
+          setDirectoryReady(true)
+        })
+    }, LOGIN_DIRECTORY_DEBOUNCE_MS)
+    return () => {
+      active = false
+      clearTimeout(timer)
+    }
+  }, [query, matched])
+  const q = normalize(query)
+  const selectedUser = resolveLoginUser(directory, query, matched)
+  const suggestions = useMemo(() => (
+    q && !matched
+      ? directory.filter((u) => normalize(u.name).startsWith(q)).slice(0, 6)
+      : []
+  ), [directory, q, matched])
+
+  const pickUser = (u) => {
+    setMatched(u)
+    setQuery(u.name)
+    setDirectory((prev) => {
+      const key = u.legacy_id || u.id
+      if (!key) return prev
+      if (prev.some((row) => (row.legacy_id || row.id) === key)) return prev
+      return [...prev, u]
+    })
+    setOpen(false)
+    setError('')
+  }
+
+  const submit = async (e, pinOverride = null) => {
+    e?.preventDefault?.()
+    if (busyRef.current) return
+    setError('')
+    let user = resolveLoginUser(directory, query, matched)
+    if (!user && String(query || '').trim().length >= LOGIN_DIRECTORY_MIN_QUERY) {
+      try {
+        const rows = await withTimeout(searchLoginDirectory(query), SESSION_CHECK_TIMEOUT_MS, 'Elenco utenti timeout')
+        setDirectory(rows)
+        setDirectoryFailed(!rows.length)
+        setDirectoryReady(true)
+        user = resolveLoginUser(rows, query, null)
+      } catch {
+        setDirectoryFailed(true)
+        setDirectoryReady(true)
+      }
+    }
+    if (!user) {
+      if (!directoryReady) return setError('Elenco utenti in caricamento… riprova tra un momento')
+      if (String(query || '').trim().length < LOGIN_DIRECTORY_MIN_QUERY) return setError('Scrivi almeno 2 lettere del nome')
+      if (directoryFailed || !directory.length) return setError('Elenco utenti non disponibile. Controlla la connessione e riprova.')
+      return setError('Seleziona un utente valido dalla lista')
+    }
+    if (user !== matched) {
+      setMatched(user)
+      setQuery(user.name)
+      setOpen(false)
+    }
+    const loginPin = pinOverride ?? pin
+    if (loginPin.length !== 4) return setError('Inserisci un PIN di 4 cifre')
+    const hotels = Array.from(new Set(user.hotels || [])).filter(Boolean)
+    if (!hotels.length) return setError('Nessuna struttura abilitata per questo utente')
+    busyRef.current = true
+    setBusy(true)
+    let lastError = null
+    for (const hotelId of hotels) {
+      try {
+        const { loginWithPin } = await import('../auth-data.js')
+        const auth = await loginWithPin({ hotelId, userId: user.legacy_id || user.id, pin: loginPin })
+        const userId = auth?.user?.id || user.id
+        onAuthenticated({ user, userId, allowedHotels: hotels, workedHotel: hotelId })
+        return
+      } catch (err) { lastError = err }
+    }
+    console.warn('Login RandApp fallito', lastError)
+    const detail = String(lastError?.message || lastError?.context?.body?.error || '').trim()
+    setError(detail && /pin|utente|struttura|tentativi|temporaneo|sessione|configurato/i.test(detail) ? detail : 'Utente o PIN non validi')
+    busyRef.current = false
+    setBusy(false)
+  }
+
+  if (recovering && selectedUser) return <PinRecoveryRequest user={selectedUser} onBack={() => setRecovering(false)} />
+
+  return (
+    <main className="rs-auth">
+      <ThemeSwitch className="rs-themeswitch--corner" />
+      <div className="rs-auth__inner">
+        <BrandMark />
+        <section className="rs-card rs-authcard">
+          <header><h1>Bentornato</h1><p>Accedi per continuare</p></header>
+          <form className="rs-authform" onSubmit={submit}>
+            <Field label="Utente">
+              <div className="rs-autocomplete">
+                <TextInput icon="user" value={query} placeholder="Scrivi il tuo nome" autoComplete="username" data-testid="login-user-input"
+                  onFocus={() => setOpen(true)}
+                  onBlur={() => setTimeout(() => setOpen(false), 150)}
+                  onChange={(e) => {
+                    const next = e.target.value
+                    setQuery(next)
+                    setError('')
+                    const auto = resolveLoginUser(directory, next, null)
+                    if (auto && normalize(auto.name) === normalize(next)) {
+                      setMatched(auto)
+                      setOpen(false)
+                    } else {
+                      setMatched(null)
+                      setOpen(true)
+                    }
+                  }} />
+                {open && suggestions.length > 0 && (
+                  <div className="rs-suggest" data-testid="login-suggestions">
+                    {suggestions.map((u) => (
+                      <button
+                        type="button"
+                        key={u.id || u.name}
+                        onMouseDown={(ev) => { ev.preventDefault(); pickUser(u) }}
+                        onClick={() => pickUser(u)}
+                      >
+                        <b>{u.name}</b>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </Field>
+            <Field label="PIN">
+              <TextInput icon="lock" value={pin} inputMode="numeric" enterKeyHint="go" autoComplete="current-password" placeholder="••••" data-testid="login-pin-input"
+                onChange={(e) => {
+                  const nextPin = e.target.value.replace(/\D/g, '').slice(0, 4)
+                  setPin(nextPin)
+                  setError('')
+                  if (nextPin.length === 4 && !busyRef.current) {
+                    void submit(null, nextPin)
+                  }
+                }} />
+            </Field>
+            {selectedUser && <button type="button" className="rs-textback" onClick={() => setRecovering(true)} data-testid="pin-forgot-link">PIN dimenticato?</button>}
+            {error && <p className="rs-error" role="alert" data-testid="login-error">{error}</p>}
+            <Button
+              type="submit"
+              variant="primary"
+              size="lg"
+              className="rs-btn--block"
+              disabled={busy}
+              aria-busy={busy || undefined}
+              data-testid="login-submit"
+              iconRight="arrowRight"
+            >
+              {busy ? 'ACCESSO…' : 'ACCEDI'}
+            </Button>
+          </form>
+          <div className="rs-divider"><span>oppure</span></div>
+          <button type="button" className="rs-settings-link" onClick={onOpenSettings} data-testid="open-settings-link">
+            <Icon name="gear" />
+            <span><b>Impostazioni</b><small>Configura l'app e le preferenze</small></span>
+            <i><Icon name="chevronRight" /></i>
+          </button>
+        </section>
+      </div>
+    </main>
+  )
+}
+
+function HotelSelector({ pending, onPick }) {
+  const hotels = (pending.allowedHotels || []).map(hotelById).filter(Boolean)
+  return (
+    <main className="rs-hotelselect">
+      <ThemeSwitch className="rs-themeswitch--corner" />
+      <div className="rs-hotelselect__head">
+        <BrandMark tagline={false} />
+        <h1>Ciao {firstName(pending.user?.name)}</h1>
+        <p>Scegli la struttura con cui vuoi lavorare</p>
+      </div>
+      <div className="rs-hotelselect__grid" data-testid="hotel-selector">
+        {hotels.map((h) => (
+          <button key={h.id} className="rs-hotel-option" onClick={() => onPick(h.id)} data-testid={`hotel-option-${h.id}`}>
+            <img src={logoFor(h.id)} alt={h.name} />
+            <span className="rs-hotel-option__text"><b>{h.name}</b><small>Accedi all'area operativa</small></span>
+            <i><Icon name="arrowRight" /></i>
+          </button>
+        ))}
+      </div>
+    </main>
+  )
+}
+
+export default function App() {
+  const [session, setSession] = useState(loadSession())
+  useEffect(() => {
+    let recovering = false
+    const onJwtRejected = async () => {
+      if (recovering || !loadSession()) return
+      recovering = true
+      try {
+        const { supabase } = await import('../supabase.js')
+        const { signOutSupabase } = await import('../auth-data.js')
+        const { JWT_CLOCK_USER_MESSAGE, isJwtLoginGraceActive } = await import('../reliability/jwt-errors.js')
+        const { operationFailed } = await import('../operation-feedback.js')
+        const { ensureRestAcceptsCurrentSession } = await import('../auth-data.js')
+        const key = 'apice-jwt-recovery-at'
+        const previous = Number(sessionStorage.getItem(key) || 0)
+        const { data: current } = await supabase?.auth.getSession() || { data: { session: null } }
+        // PostgREST clock skew must not eject a still-valid Auth session right after PIN login.
+        if (!current?.session?.refresh_token) {
+          sessionStorage.removeItem(key)
+          await signOutSupabase()
+          clearSession()
+          return
+        }
+        if (Date.now() - previous < 90000 || isJwtLoginGraceActive()) {
+          // Silent settle: the alarming "esci e accedi" toast made operators think login failed.
+          await ensureRestAcceptsCurrentSession(8)
+          return
+        }
+        sessionStorage.setItem(key, String(Date.now()))
+        const refreshed = await supabase.auth.refreshSession()
+        const verified = refreshed?.error ? null : await supabase.auth.getUser()
+        if (refreshed?.error || !refreshed?.data?.session || verified?.error || !verified?.data?.user) {
+          sessionStorage.removeItem(key)
+          await signOutSupabase()
+          clearSession()
+          operationFailed(new Error(JWT_CLOCK_USER_MESSAGE), 'Accesso richiesto di nuovo')
+          return
+        }
+        await ensureRestAcceptsCurrentSession(12)
+        window.location.reload()
+      } catch {
+        // Transport failures must not wipe a PIN session the operator just opened.
+      } finally {
+        recovering = false
+      }
+    }
+    window.addEventListener('apice-jwt-clock-rejected', onJwtRejected)
+    return () => window.removeEventListener('apice-jwt-clock-rejected', onJwtRejected)
+  }, [])
+
+  const [sessionReady, setSessionReady] = useState(() => !loadSession())
+  const [validatedDirectory, setValidatedDirectory] = useState(null)
+  const [pending, setPending] = useState(null)
+  const [settingsFromLogin, setSettingsFromLogin] = useState(false)
+  const recoveryToken = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('pinRecovery') : null
+  const [recoveryDone, setRecoveryDone] = useState(false)
+
+  useEffect(() => {
+    const onChange = () => setSession(loadSession())
+    window.addEventListener(EVENT, onChange)
+    return () => window.removeEventListener(EVENT, onChange)
+  }, [])
+
+  useEffect(() => {
+    if (!session) {
+      setValidatedDirectory(null)
+      setSessionReady(true)
+      return undefined
+    }
+    let active = true
+    setSessionReady(false)
+    const resetSession = async (signOutSupabase) => {
+      try { await signOutSupabase?.() } catch { /* local reset still proceeds */ }
+      clearSession()
+      if (!active) return
+      setValidatedDirectory(null)
+      setPending(null)
+      setSession(null)
+      setSessionReady(true)
+    }
+    const validate = async () => {
+      if (!navigator.onLine) {
+        if (!isOfflineSessionFresh(session)) {
+          console.warn('Sessione offline scaduta: nuovo accesso richiesto')
+          await resetSession()
+          return
+        }
+        if (active) setSessionReady(true)
+        return
+      }
+      try {
+        const { validateSupabaseSession, signOutSupabase, ensureRestAcceptsCurrentSession } = await import('../auth-data.js')
+        const result = await withTimeout(validateSupabaseSession(), SESSION_CHECK_TIMEOUT_MS, 'Controllo sessione timeout')
+        if (active && !result.valid) {
+          await resetSession(signOutSupabase)
+          return
+        }
+        if (!active) return
+        // Prefer waiting for PostgREST acceptance before Home fires parallel REST reads.
+        await withTimeout(ensureRestAcceptsCurrentSession(20), 25000, 'Allineamento sessione timeout').catch(() => false)
+        if (!active) return
+        const { fetchDirectory } = await import('../users-data.js')
+        const directory = await withTimeout(fetchDirectory(session.hotelId), SESSION_CHECK_TIMEOUT_MS, 'Directory sessione timeout')
+        if (!active) return
+        const rows = directory?.users || []
+        const authorized = rows.some((u) => u.auth_user_id === session.userId || u.id === session.userId || u.legacy_id === session.userId)
+        if (!authorized) {
+          console.warn('Sessione RandApp non più associata alla struttura: accesso ripristinato')
+          await resetSession(signOutSupabase)
+          return
+        }
+        const validatedSession = markSessionValidated(session)
+        saveSession(validatedSession)
+        if (active) {
+          setValidatedDirectory({ hotelId: session.hotelId, users: rows })
+          setSessionReady(true)
+        }
+      } catch (error) {
+        console.warn('Controllo sessione rimandato', error)
+        if (isOfflineSessionFresh(session)) {
+          if (active) setSessionReady(true)
+        } else {
+          await resetSession()
+        }
+      }
+    }
+    validate()
+    window.addEventListener('online', validate)
+    return () => { active = false; window.removeEventListener('online', validate) }
+  }, [session?.hotelId, session?.userId])
+
+  const onAuthenticated = ({ user, userId, allowedHotels, workedHotel }) => {
+    const now = Date.now()
+    if (allowedHotels.length <= 1) {
+      saveSession({ hotelId: allowedHotels[0] || workedHotel, userId, createdAt: now, lastValidatedAt: now })
+      setSession(loadSession())
+      setSessionReady(false)
+    } else {
+      setPending({ user, userId, allowedHotels, validatedAt: now })
+    }
+  }
+
+  const pickHotel = (hotelId) => {
+    const now = Date.now()
+    saveSession({ hotelId, userId: pending.userId, createdAt: now, lastValidatedAt: pending.validatedAt || now })
+    setPending(null)
+    setSession(loadSession())
+    setSessionReady(false)
+  }
+
+  const onLogout = async () => {
+    const { signOutSupabase } = await import('../auth-data.js')
+    await signOutSupabase()
+    clearSession()
+    setPending(null)
+    setSession(null)
+    setSessionReady(true)
+  }
+
+  if (recoveryToken && !recoveryDone) return <PinRecoveryComplete token={recoveryToken} onDone={() => { setRecoveryDone(true); try { window.history.replaceState({}, '', window.location.pathname) } catch { /* noop */ } }} />
+  if (settingsFromLogin) return <AdminGate onBack={() => setSettingsFromLogin(false)} onExit={() => setSettingsFromLogin(false)} />
+  if (session && !sessionReady) return <Spinner label="Allineo la sessione…" />
+  if (session) return <Suspense fallback={<Spinner label="Avvio RandApp…" />}><Shell session={session} initialDirectory={validatedDirectory} onLogout={onLogout} onSwitchHotel={(id) => { setValidatedDirectory(null); saveSession({ ...session, hotelId: id }); setSession(loadSession()); setSessionReady(false) }} /></Suspense>
+  if (pending) return <HotelSelector pending={pending} onPick={pickHotel} />
+  return <Login onAuthenticated={onAuthenticated} onOpenSettings={() => setSettingsFromLogin(true)} />
+}

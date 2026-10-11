@@ -1,0 +1,19 @@
+# Solo le funzioni che devono accettare chiamate senza JWT Supabase sono
+# dichiarate qui. L'accesso applicativo resta comunque protetto dal contratto
+# specifico della funzione.
+
+# PIN login + directory: autenticazione propria (PIN/membership/rate-limit).
+# verify_jwt=false evita che uno skew PGRST303 sul gateway espella l'operatore
+# subito dopo setSession, prima che pin-auth possa validare membership via Auth.
+[functions.pin-auth]
+verify_jwt = false
+
+# Link pubblico inviato al tecnico esterno via WhatsApp.
+[functions.public-iss]
+verify_jwt = false
+
+# Worker server-to-server invocato da pg_cron/pg_net. Non usa JWT utente:
+# richiede invece x-cron-secret confrontato lato server con
+# edge_function_secrets.randchat_media_cron_secret.
+[functions.randchat-media-cleanup]
+verify_jwt = false

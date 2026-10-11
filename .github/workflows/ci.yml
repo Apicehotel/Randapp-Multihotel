@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SUPABASE_URL: https://ooqlfldcrnkudhgjnied.supabase.co
+      VITE_SUPABASE_URL: https://ooqlfldcrnkudhgjnied.supabase.co
+      VITE_SUPABASE_ANON_KEY: sb_publishable_Oiu7IOhuUd6YPEDmmSa7zA_ngNuiSlX
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Dependency security audit
+        run: npm audit --audit-level=high
+
+      - name: Phase 0 foundation freeze
+        run: npm run test:phase0
+
+      - name: Phase 1 identity and authorization
+        run: npm run test:phase1
+
+      - name: Quality matrix
+        run: npm run test:matrix
+
+      - name: Critical operational gate
+        run: npm run test:critical
+
+      - name: Operational chaos gate
+        run: npm run test:chaos
+
+      - name: Multi-hotel parity gate
+        run: npm run test:multihotel
+
+      - name: Build
+        run: npm run build
+
+      - name: Bundle budget
+        run: node scripts/check-bundle.mjs
+
+      - name: RandUI visual quality contracts
+        run: npm run test:randui
+
+      - name: Full test suite
+        run: npm test
+
+      - name: Install Playwright Chromium and WebKit
+        run: npx playwright install --with-deps chromium webkit
+
+      - name: Start preview server
+        run: |
+          npm run preview -- --host 127.0.0.1 --port 4173 > /tmp/apice-vite.log 2>&1 &
+          echo $! > /tmp/apice-vite.pid
+          for i in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:4173 >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/apice-vite.log
+          exit 1
+
+      - name: Cross-platform browser gate
+        env:
+          E2E_BASE_URL: http://127.0.0.1:4173
+        run: npm run test:e2e
+
+      - name: Device acceptance gate
+        env:
+          E2E_BASE_URL: http://127.0.0.1:4173
+        run: npm run test:device
+
+      - name: Upload E2E screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-screenshots-${{ github.sha }}
+          path: test/artifacts/
+          if-no-files-found: ignore
+          retention-days: 7
